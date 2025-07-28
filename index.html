@@ -22,18 +22,18 @@
         <form id="calibration-form">
             <div class="slider-group">
                 <h3>PID</h3>
-                <label>KP: <input type="range" name="kp" min="0" max="1" step="0.01" value="0.4"></label><br>
-                <label>KI: <input type="range" name="ki" min="0" max="1" step="0.01" value="0.0"></label><br>
-                <label>KD: <input type="range" name="kd" min="0" max="1" step="0.01" value="0.1"></label><br>
+                <label>KP: <input type="range" name="kp" min="0" max="1" step="0.01" value="{{ config.pid.kp }}"></label><br>
+                <label>KI: <input type="range" name="ki" min="0" max="1" step="0.01" value="{{ config.pid.ki }}"></label><br>
+                <label>KD: <input type="range" name="kd" min="0" max="1" step="0.01" value="{{ config.pid.kd }}"></label><br>
             </div>
             <div class="slider-group">
                 <h3>HSV - Preto</h3>
-                <label>H_min: <input type="range" name="h_min_black" min="0" max="180" value="0"></label><br>
-                <label>S_min: <input type="range" name="s_min_black" min="0" max="255" value="0"></label><br>
-                <label>V_min: <input type="range" name="v_min_black" min="0" max="255" value="0"></label><br>
-                <label>H_max: <input type="range" name="h_max_black" min="0" max="180" value="180"></label><br>
-                <label>S_max: <input type="range" name="s_max_black" min="0" max="255" value="255"></label><br>
-                <label>V_max: <input type="range" name="v_max_black" min="0" max="255" value="50"></label><br>
+                <label>H_min: <input type="range" name="h_min_black" min="0" max="180" value="{{ config.hsv_black.lower[0] }}"></label><br>
+                <label>S_min: <input type="range" name="s_min_black" min="0" max="255" value="{{ config.hsv_black.lower[1] }}"></label><br>
+                <label>V_min: <input type="range" name="v_min_black" min="0" max="255" value="{{ config.hsv_black.lower[2] }}"></label><br>
+                <label>H_max: <input type="range" name="h_max_black" min="0" max="180" value="{{ config.hsv_black.upper[0] }}"></label><br>
+                <label>S_max: <input type="range" name="s_max_black" min="0" max="255" value="{{ config.hsv_black.upper[1] }}"></label><br>
+                <label>V_max: <input type="range" name="v_max_black" min="0" max="255" value="{{ config.hsv_black.upper[2] }}"></label><br>
             </div>
             <button type="submit">Salvar</button>
         </form>

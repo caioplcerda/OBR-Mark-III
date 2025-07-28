@@ -2,6 +2,7 @@ from flask import Flask, Response, render_template_string, request, jsonify
 import cv2
 import numpy as np
 import os
+import json
 
 app = Flask(__name__)
 
@@ -20,7 +21,7 @@ config = {
 def index():
     """ Serve a página de calibração. """
     with open('index.html', 'r') as f:
-        return render_template_string(f.read())
+        return render_template_string(f.read(), config=config)
 
 @app.route('/calibrate', methods=['POST'])
 def calibrate():
@@ -36,8 +37,36 @@ def calibrate():
     config['hsv_black']['lower'] = np.array([int(data['h_min_black']), int(data['s_min_black']), int(data['v_min_black'])])
     config['hsv_black']['upper'] = np.array([int(data['h_max_black']), int(data['s_max_black']), int(data['v_max_black'])])
 
-    print(f"Novos parâmetros recebidos: {config}")
+    # Salva a configuração em um arquivo JSON
+    save_config()
+
+    print(f"Novos parâmetros recebidos e salvos: {config}")
     return jsonify(success=True)
+
+def save_config():
+    """ Salva o objeto de configuração em config.json. """
+    with open('config.json', 'w') as f:
+        config_to_save = {
+            'pid': config['pid'],
+            'hsv_black': {
+                'lower': config['hsv_black']['lower'].tolist(),
+                'upper': config['hsv_black']['upper'].tolist()
+            }
+        }
+        json.dump(config_to_save, f, indent=4)
+
+def load_config():
+    """ Carrega a configuração de config.json, se existir. """
+    if os.path.exists('config.json'):
+        with open('config.json', 'r') as f:
+            loaded_config = json.load(f)
+            config['pid'] = loaded_config['pid']
+            config['hsv_black']['lower'] = np.array(loaded_config['hsv_black']['lower'])
+            config['hsv_black']['upper'] = np.array(loaded_config['hsv_black']['upper'])
+            print("Configuração carregada de config.json")
+
+# Carrega a configuração ao iniciar
+load_config()
 
 # --- Lógica do Stream de Vídeo ---
 
