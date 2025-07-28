@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calibração do Robô</title>
+    <style>
+        body { font-family: sans-serif; display: flex; }
+        .container { display: flex; flex-direction: column; margin: 20px; }
+        .stream { width: 640px; height: 240px; border: 1px solid black; }
+        .controls { display: flex; flex-direction: column; }
+        .slider-group { margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stream do Robô</h1>
+        <img class="stream" src="/stream" />
+    </div>
+    <div class="container controls">
+        <h1>Calibração</h1>
+        <form id="calibration-form">
+            <div class="slider-group">
+                <h3>PID</h3>
+                <label>KP: <input type="range" name="kp" min="0" max="1" step="0.01" value="0.4"></label><br>
+                <label>KI: <input type="range" name="ki" min="0" max="1" step="0.01" value="0.0"></label><br>
+                <label>KD: <input type="range" name="kd" min="0" max="1" step="0.01" value="0.1"></label><br>
+            </div>
+            <div class="slider-group">
+                <h3>HSV - Preto</h3>
+                <label>H_min: <input type="range" name="h_min_black" min="0" max="180" value="0"></label><br>
+                <label>S_min: <input type="range" name="s_min_black" min="0" max="255" value="0"></label><br>
+                <label>V_min: <input type="range" name="v_min_black" min="0" max="255" value="0"></label><br>
+                <label>H_max: <input type="range" name="h_max_black" min="0" max="180" value="180"></label><br>
+                <label>S_max: <input type="range" name="s_max_black" min="0" max="255" value="255"></label><br>
+                <label>V_max: <input type="range" name="v_max_black" min="0" max="255" value="50"></label><br>
+            </div>
+            <button type="submit">Salvar</button>
+        </form>
+    </div>
+    <script>
+        document.getElementById('calibration-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const data = Object.fromEntries(formData.entries());
+            fetch('/calibrate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            }).then(response => {
+                if (response.ok) {
+                    alert('Parâmetros salvos com sucesso!');
+                } else {
+                    alert('Erro ao salvar os parâmetros.');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

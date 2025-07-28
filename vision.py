@@ -3,10 +3,9 @@ import numpy as np
 
 class Vision:
     """ Classe para todo o processamento de visão computacional. """
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         # === Limites de cor HSV para detecção ===
-        self.LOWER_BLACK = np.array([0, 0, 0])
-        self.UPPER_BLACK = np.array([180, 255, 50])
         self.LOWER_GREEN = np.array([40, 50, 50])
         self.UPPER_GREEN = np.array([85, 255, 255])
         self.LOWER_SILVER = np.array([0, 0, 180])
@@ -15,14 +14,19 @@ class Vision:
         # === Parâmetros de Visão ===
         self.FRAME_WIDTH = 640
         self.CENTER_X = self.FRAME_WIDTH // 2
-        self.GREEN_THRESHOLD_AREA = 5000  # Área mínima para detectar o verde
-        self.OBSTACLE_MIN_AREA = 2000     # Área mínima para detectar um obstáculo
-        self.OBSTACLE_REGION_Y = 100      # Posição Y para verificar obstáculos
+        self.GREEN_THRESHOLD_AREA = 5000
+        self.OBSTACLE_MIN_AREA = 2000
+        self.OBSTACLE_REGION_Y = 100
 
     def detect_line_features(self, frame):
         """ Detecta características da linha, como centroide, interseções e obstáculos. """
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask_black = cv2.inRange(hsv, self.LOWER_BLACK, self.UPPER_BLACK)
+
+        lower_black = self.config['hsv_black']['lower']
+        upper_black = self.config['hsv_black']['upper']
+        mask_black = cv2.inRange(hsv, lower_black, upper_black)
+
         mask_green = cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
 
         # Múltiplos ROIs (Regiões de Interesse) para uma análise mais robusta da linha
@@ -61,6 +65,7 @@ class Vision:
 
     def detect_balls(self, frame):
         """ Detecta as bolas de resgate (prateadas e pretas). """
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask_silver = cv2.inRange(hsv, self.LOWER_SILVER, self.UPPER_SILVER)
         mask_black = cv2.inRange(hsv, self.LOWER_BLACK, self.UPPER_BLACK)
