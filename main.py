@@ -6,7 +6,7 @@ from hardware_control import HardwareControl
 from vision import Vision
 from line_follower import LineFollower
 from rescue import Rescue
-from web_stream import run_stream, update_frame
+from web_stream import run_stream, update_frame, config
 
 class Robot:
     """ Classe principal que orquestra o robô. """
@@ -18,8 +18,8 @@ class Robot:
         time.sleep(1)
 
         # Inicializa os módulos de controle
-        self.hardware = HardwareControl()
-        self.vision = Vision()
+        self.hardware = HardwareControl(config)
+        self.vision = Vision(config)
         self.line_follower = LineFollower(self.hardware, self.vision)
         self.rescue = Rescue(self.hardware, self.vision, self.picam2)
 

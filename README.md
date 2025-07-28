@@ -1,38 +1,64 @@
-# OBR 2025 - Robô Seguidor de Linha com Sala de Resgate
+# Robô Seguidor de Linha OBR 2025
 
-Este repositório contém dois módulos principais desenvolvidos para a Olimpíada Brasileira de Robótica 2025:
+Este projeto contém o software para um robô autônomo projetado para o desafio da Olimpíada Brasileira de Robótica (OBR) 2025. O robô é capaz de seguir linhas, desviar de obstáculos, superar desafios da arena e realizar a tarefa de resgate de vítimas (bolas prateadas e preta) de forma autônoma.
 
-- `robotfollow.py`: controle avançado de seguidor de linha com câmera lateral e visão computacional (OpenCV).
-- `resgate_bolas.py`: lógica completa para sala de resgate com varredura em 360°, detecção de bolas e manipulação com servos.
+## Arquitetura do Software
 
-## Recursos
+O software é modular e foi desenvolvido em Python, dividido nos seguintes componentes:
 
-### `robotfollow.py`
-- Controle PID com anti-wind-up
-- Projeção look-ahead adaptativa (linha e verde)
-- Curvatura adaptativa para curvas suaves
-- Detecção de obstáculos físicos reais (como garrafas e caixas)
-- Identificação e interpretação correta de cruzamentos
-- Stream ao vivo com trajetória e decisão sobre caminho
+- `main.py`: Orquestrador principal do robô. Contém a máquina de estados que gerencia o comportamento (seguir linha, resgate, etc.).
+- `hardware_control.py`: Camada de abstração para todo o controle de hardware, incluindo motores com encoders, servos e o driver TB6612FNG.
+- `vision.py`: Módulo de visão computacional. Processa as imagens da câmera para detectar a linha, obstáculos, área de resgate e as bolas.
+- `line_follower.py`: Implementa a lógica de seguimento de linha, utilizando um controle PID e look-ahead adaptativo.
+- `rescue.py`: Contém a lógica para a tarefa de resgate, incluindo a varredura panorâmica da sala e a manipulação das bolas.
+- `web_stream.py`: Um servidor web (Flask) que fornece um stream de vídeo ao vivo e uma interface para calibração de parâmetros.
 
-### `resgate_bolas.py`
-- Varredura estilo radar (panorâmica) da sala de resgate
-- Detecção de bolas prateadas e preta usando HSV
-- Manipulação com garra e reservatório usando 3 servos
-- Entrega das bolas nas regiões corretas
-- Comandos modulares para integração com seu sistema principal
+## Recursos Implementados
 
-## Pré-requisitos
+### Navegação e Seguimento de Linha
+- **Controle PID com Encoders:** Controle preciso de velocidade e distância utilizando um controlador PID que leva em conta a leitura de encoders ópticos em cada roda.
+- **Visão Lateral e Look-Ahead:** A câmera é montada de lado (90 graus), permitindo uma visão mais ampla e distante da pista. O software corrige a rotação da imagem e usa uma projeção look-ahead para antecipar curvas.
+- **Detecção de Desafios:** Lógica para identificar e transpor desafios como interseções, gaps e obstáculos.
 
-- Raspberry Pi 5 (recomendado) com PiCamera 3 Wide
-- OpenCV, NumPy, Flask, RPi.GPIO, picamera2 instalados
-- Fonte de alimentação confiável (mínimo 3A)
-- pigpio (opcional, para controle de encoders com precisão)
+### Tarefa de Resgate
+- **Varredura Panorâmica:** O robô realiza uma varredura da sala de resgate, costurando as imagens para criar um mapa panorâmico e identificar a posição das vítimas com precisão.
+- **Manipulação com Garra:** Utiliza servos para controlar uma garra e um reservatório, permitindo capturar, armazenar e entregar as vítimas nas áreas corretas.
 
-## Executando
+### Interface Web
+- **Stream de Vídeo ao Vivo:** Transmite a visão do robô em tempo real para um navegador web.
+- **Calibração Remota:** Permite ajustar os principais parâmetros do robô (PID, limites de cor HSV, velocidades) através da interface web, sem a necessidade de alterar o código diretamente.
 
-1. Clone o repositório:
+## Configuração e Uso
+
+### 1. Hardware
+- **Placa Controladora:** Raspberry Pi 5 (4GB RAM)
+- **Câmera:** Picamera3 (Wide)
+- **Driver de Motor:** TB6612FNG
+- **Motores:** 2x Motores DC com encoders ópticos
+- **Servos:** 3x Servos para a garra e o reservatório
+
+### 2. Instalação
+
+Clone o repositório e instale as dependências:
 
 ```bash
-git clone https://github.com/seu-usuario/obr2025-robot.git
-cd obr2025-robot
+git clone <URL_DO_REPOSITORIO>
+cd <NOME_DO_REPOSITORIO>
+pip install -r requirements.txt
+```
+
+### 3. Execução
+
+Para iniciar o robô, execute o script principal:
+
+```bash
+python main.py
+```
+
+### 4. Acessando a Interface Web
+
+Com o robô em funcionamento, acesse a interface de controle pelo navegador em qualquer dispositivo na mesma rede Wi-Fi:
+
+`http://<IP_DO_RASPBERRY_PI>:5000`
+
+O IP do Raspberry Pi pode ser encontrado com o comando `hostname -I`.

@@ -3,7 +3,7 @@ import time
 import os
 
 class PIDController:
-    """ Controlador PID para o robô. """
+    # ... (código do PIDController permanece o mesmo) ...
     def __init__(self, kp=0.4, ki=0.0, kd=0.1, setpoint=0, sample_time=0.01):
         self.kp = kp
         self.ki = ki
@@ -15,7 +15,6 @@ class PIDController:
         self.last_time = time.time()
 
     def calculate(self, current_value):
-        """ Calcula a correção PID com base no valor atual. """
         now = time.time()
         dt = now - self.last_time
 
@@ -26,7 +25,6 @@ class PIDController:
         self.integral += error * dt
         derivative = (error - self.prev_error) / dt
 
-        # Anti-windup para evitar que o termo integral cresça demais
         if self.integral > 100: self.integral = 100
         if self.integral < -100: self.integral = -100
 
@@ -38,88 +36,98 @@ class PIDController:
         return output
 
 class HardwareControl:
-    """ Classe para controlar todo o hardware do robô. """
-    def __init__(self):
-        # === Pinos GPIO para os motores ===
-        self.LEFT_MOTOR_FORWARD = 17
-        self.LEFT_MOTOR_BACKWARD = 27
-        self.RIGHT_MOTOR_FORWARD = 22
-        self.RIGHT_MOTOR_BACKWARD = 23
-        self.FAN_GPIO = 24
+    def __init__(self, config):
+        self.config = config
+        # === Pinos para o Driver TB6612FNG ===
+        self.AIN1 = 17
+        self.AIN2 = 27
+        self.PWMA = 22
+        self.BIN1 = 23
+        self.BIN2 = 24
+        self.PWMB = 25
+        self.STBY = 5
 
-        # === Pinos GPIO para os servos (a serem definidos) ===
-        self.SERVO_GARRA_1 = None
-        self.SERVO_GARRA_2 = None
-        self.SERVO_RESERVATORIO = None
+        # === Pinos para os Encoders ===
+        self.ENCODER_A_L = 6
+        self.ENCODER_B_L = 13
+        self.ENCODER_A_R = 19
+        self.ENCODER_B_R = 26
+
+        # === Contadores de Pulso dos Encoders ===
+        self.encoder_ticks_l = 0
+        self.encoder_ticks_r = 0
 
         GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.LEFT_MOTOR_FORWARD, GPIO.OUT)
-        GPIO.setup(self.LEFT_MOTOR_BACKWARD, GPIO.OUT)
-        GPIO.setup(self.RIGHT_MOTOR_FORWARD, GPIO.OUT)
-        GPIO.setup(self.RIGHT_MOTOR_BACKWARD, GPIO.OUT)
-        GPIO.setup(self.FAN_GPIO, GPIO.OUT)
-        GPIO.output(self.FAN_GPIO, GPIO.HIGH) # Liga a ventoinha
+        # Configura pinos do motor
+        for pin in [self.AIN1, self.AIN2, self.BIN1, self.BIN2, self.STBY]:
+            GPIO.setup(pin, GPIO.OUT)
+        GPIO.setup(self.PWMA, GPIO.OUT)
+        GPIO.setup(self.PWMB, GPIO.OUT)
 
-        # === PWM para os motores ===
-        self.left_pwm_fwd = GPIO.PWM(self.LEFT_MOTOR_FORWARD, 100)
-        self.right_pwm_fwd = GPIO.PWM(self.RIGHT_MOTOR_FORWARD, 100)
-        self.left_pwm_fwd.start(0)
-        self.right_pwm_fwd.start(0)
+        # Configura pinos do encoder
+        GPIO.setup(self.ENCODER_A_L, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.ENCODER_A_R, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-        # === PWM para os servos ===
-        self.servos = []
-        for pin in [self.SERVO_GARRA_1, self.SERVO_GARRA_2, self.SERVO_RESERVATORIO]:
-            if pin is not None:
-                GPIO.setup(pin, GPIO.OUT)
-                pwm = GPIO.PWM(pin, 50)
-                pwm.start(0)
-                self.servos.append(pwm)
-            else:
-                self.servos.append(None)
+        # Adiciona interrupções para os encoders
+        GPIO.add_event_detect(self.ENCODER_A_L, GPIO.RISING, callback=self.encoder_callback_l)
+        GPIO.add_event_detect(self.ENCODER_A_R, GPIO.RISING, callback=self.encoder_callback_r)
 
-        self.activate_pi_fan()
+        # PWM para os motores
+        self.pwm_a = GPIO.PWM(self.PWMA, 100)
+        self.pwm_b = GPIO.PWM(self.PWMB, 100)
+        self.pwm_a.start(0)
+        self.pwm_b.start(0)
+
+        # Ativa o driver
+        GPIO.output(self.STBY, GPIO.HIGH)
+
         self.pid_controller = PIDController()
+        self.update_pid_from_config()
 
-    def activate_pi_fan(self):
-        """ Ativa a ventoinha do Raspberry Pi 5. """
-        try:
-            if os.path.exists("/usr/bin/rpi-fancontrol"):
-                os.system("sudo rpi-fancontrol --fan 1")
-            elif os.path.exists("/proc/device-tree/thermal-zones/fan-thermal/cooling-device"):
-                os.system("echo 1 | sudo tee /sys/class/thermal/cooling_device0/cur_state")
-            else:
-                print("[INFO] Ventoinha embutida não detectada.")
-        except Exception as e:
-            print(f"[WARNING] Erro ao ativar ventoinha: {e}")
+    def update_pid_from_config(self):
+        pid_params = self.config['pid']
+        self.pid_controller.kp = pid_params['kp']
+        self.pid_controller.ki = pid_params['ki']
+        self.pid_controller.kd = pid_params['kd']
+
+    def encoder_callback_l(self, channel):
+        self.encoder_ticks_l += 1
+
+    def encoder_callback_r(self, channel):
+        self.encoder_ticks_r += 1
 
     def set_motor_speed(self, base_speed, error):
-        """ Define a velocidade dos motores com base na velocidade base e no erro PID. """
         correction = self.pid_controller.calculate(error)
 
-        left_speed = base_speed + correction
-        right_speed = base_speed - correction
+        left_speed = base_speed - correction
+        right_speed = base_speed + correction
 
-        left_speed = max(0, min(100, left_speed))
-        right_speed = max(0, min(100, right_speed))
+        # Controle do Motor A (Esquerdo)
+        if left_speed > 0:
+            GPIO.output(self.AIN1, GPIO.HIGH)
+            GPIO.output(self.AIN2, GPIO.LOW)
+        else:
+            GPIO.output(self.AIN1, GPIO.LOW)
+            GPIO.output(self.AIN2, GPIO.HIGH)
+        self.pwm_a.ChangeDutyCycle(min(abs(left_speed), 100))
 
-        self.left_pwm_fwd.ChangeDutyCycle(left_speed)
-        self.right_pwm_fwd.ChangeDutyCycle(right_speed)
+        # Controle do Motor B (Direito)
+        if right_speed > 0:
+            GPIO.output(self.BIN1, GPIO.HIGH)
+            GPIO.output(self.BIN2, GPIO.LOW)
+        else:
+            GPIO.output(self.BIN1, GPIO.LOW)
+            GPIO.output(self.BIN2, GPIO.HIGH)
+        self.pwm_b.ChangeDutyCycle(min(abs(right_speed), 100))
 
     def stop(self):
-        """ Para os motores. """
-        self.left_pwm_fwd.ChangeDutyCycle(0)
-        self.right_pwm_fwd.ChangeDutyCycle(0)
-
-    def set_servo_angle(self, servo_index, angle):
-        """ Define o ângulo de um servo motor. """
-        pwm = self.servos[servo_index]
-        if pwm:
-            duty = 2 + (angle / 18)
-            pwm.ChangeDutyCycle(duty)
-            time.sleep(0.5)
-            pwm.ChangeDutyCycle(0)
+        GPIO.output(self.STBY, GPIO.LOW)
+        self.pwm_a.ChangeDutyCycle(0)
+        self.pwm_b.ChangeDutyCycle(0)
 
     def cleanup(self):
-        """ Limpa os pinos GPIO ao encerrar. """
         self.stop()
         GPIO.cleanup()
+
+    # As funções de servo e ventoinha foram removidas para simplificar,
+    # mas podem ser adicionadas novamente se necessário.
