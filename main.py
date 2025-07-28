@@ -35,10 +35,10 @@ class Robot:
                 # --- MÁQUINA DE ESTADOS ---
 
                 if self.state == "FOLLOWING_LINE":
-                    status, path_history = self.line_follower.follow_line(frame)
+                    cx, green, obstacle, intersection, _, _, _, curvature = self.vision.detect_line_features(frame)
+                    status, path_history = self.line_follower.follow_line(frame, curvature)
 
                     # Verifica as condições para mudar de estado
-                    _, green, obstacle, intersection, _, _, _ = self.vision.detect_line_features(frame)
 
                     if intersection:
                         self.state = "INTERSECTION"

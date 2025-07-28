@@ -52,7 +52,12 @@ class Vision:
         green_detected = cv2.countNonZero(mask_green) > self.GREEN_THRESHOLD_AREA
         obstacle = self.detect_obstacle(mask_black)
 
-        return cx, green_detected, obstacle, intersection, mask_black, mask_green, centroids
+        # Calcula a curvatura com base na diferença entre os centroides
+        curvature = 0
+        if centroids['top'] != -1 and centroids['bottom'] != -1:
+            curvature = centroids['top'] - centroids['bottom']
+
+        return cx, green_detected, obstacle, intersection, mask_black, mask_green, centroids, curvature
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """
