@@ -8,8 +8,16 @@ class Vision:
         # === Limites de cor HSV para detecção ===
         self.LOWER_GREEN = np.array([40, 50, 50])
         self.UPPER_GREEN = np.array([85, 255, 255])
-        self.LOWER_SILVER = np.array([0, 0, 180])
-        self.UPPER_SILVER = np.array([180, 50, 255])
+
+        # Limites para a cor Prata/Cinza
+        self.LOWER_SILVER = np.array([0, 0, 100])
+        self.UPPER_SILVER = np.array([180, 30, 220])
+
+        # Limites para a cor Vermelha (duas faixas no HSV)
+        self.LOWER_RED1 = np.array([0, 70, 50])
+        self.UPPER_RED1 = np.array([10, 255, 255])
+        self.LOWER_RED2 = np.array([170, 70, 50])
+        self.UPPER_RED2 = np.array([180, 255, 255])
 
         # === Parâmetros de Visão ===
         self.FRAME_WIDTH = 640
@@ -49,10 +57,23 @@ class Vision:
         # Uma interseção é detectada se a linha estiver presente em todos os ROIs
         intersection = all(c != -1 for c in centroids.values())
 
-        green_detected = cv2.countNonZero(mask_green) > self.GREEN_THRESHOLD_AREA
+        # Detecção de cores em área ampla
+        mask_silver = cv2.inRange(hsv, self.LOWER_SILVER, self.UPPER_SILVER)
+        mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
+        mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
+        mask_red = cv2.add(mask_red1, mask_red2)
+
+        silver_detected = cv2.countNonZero(mask_silver) > self.GREEN_THRESHOLD_AREA # Reutilizando o threshold
+        red_detected = cv2.countNonZero(mask_red) > self.GREEN_THRESHOLD_AREA
+
         obstacle = self.detect_obstacle(mask_black)
 
-        return cx, green_detected, obstacle, intersection, mask_black, mask_green, centroids
+        # Calcula a curvatura
+        curvature = 0
+        if centroids['top'] != -1 and centroids['bottom'] != -1:
+            curvature = centroids['top'] - centroids['bottom']
+
+        return cx, silver_detected, red_detected, obstacle, intersection, centroids, curvature
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """

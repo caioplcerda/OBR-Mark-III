@@ -2,6 +2,7 @@ import cv2
 import time
 import threading
 from picamera2 import Picamera2
+import RPi.GPIO as GPIO
 from hardware_control import HardwareControl
 from vision import Vision
 from line_follower import LineFollower
@@ -24,7 +25,7 @@ class Robot:
         self.rescue = Rescue(self.hardware, self.vision, self.picam2)
 
         # Define o estado inicial do robô
-        self.state = "FOLLOWING_LINE"
+        self.state = "WAITING"
 
     def run(self):
         """ Loop principal do robô, gerenciado por uma máquina de estados. """
@@ -34,18 +35,28 @@ class Robot:
 
                 # --- MÁQUINA DE ESTADOS ---
 
-                if self.state == "FOLLOWING_LINE":
-                    status, path_history = self.line_follower.follow_line(frame)
+                if self.state == "WAITING":
+                    status = "Aguardando início..."
+                    path_history = []
+                    # Verifica se o botão foi pressionado (pino em LOW por causa do pull-up)
+                    if not GPIO.input(self.hardware.START_BUTTON):
+                        print("Botão pressionado, iniciando percurso!")
+                        self.state = "FOLLOWING_LINE"
+                        time.sleep(0.5) # Debounce do botão
+
+                elif self.state == "FOLLOWING_LINE":
+                    cx, silver_detected, red_detected, obstacle, intersection, _, curvature = self.vision.detect_line_features(frame)
+                    status, path_history = self.line_follower.follow_line(frame, curvature)
 
                     # Verifica as condições para mudar de estado
-                    _, green, obstacle, intersection, _, _, _ = self.vision.detect_line_features(frame)
-
-                    if intersection:
+                    if red_detected:
+                        self.state = "FINISHING"
+                    elif silver_detected:
+                        self.state = "RESCUE"
+                    elif intersection:
                         self.state = "INTERSECTION"
                     elif obstacle:
                         self.state = "AVOIDING_OBSTACLE"
-                    elif green:
-                        self.state = "RESCUE"
 
                     # Atualiza o frame para o stream
                     cv2.putText(frame, f"State: {self.state} | {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
@@ -74,8 +85,10 @@ class Robot:
                     self.state = "FINISHING"
 
                 elif self.state == "FINISHING":
-                    print("Estado: FINISHING")
+                    print("Estado: FINISHING. Parando por 5 segundos...")
                     self.hardware.stop()
+                    time.sleep(5)
+                    print("Percurso finalizado.")
                     break # Encerra o loop principal
 
                 time.sleep(0.05)
