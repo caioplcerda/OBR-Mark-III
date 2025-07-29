@@ -1,142 +1,126 @@
-from flask import Flask, Response, render_template_string, request, jsonify
 import cv2
 import numpy as np
 import os
 import json
 import threading
+from flask import Flask, Response, render_template_string, request, jsonify
 
 app = Flask(__name__)
 
-# Objeto de configuração e evento de início
+# --- Configuração e Sincronização ---
 config = {
     "pid": {"kp": 0.4, "ki": 0.0, "kd": 0.1},
-    "hsv_black": {
-        "lower": np.array([0, 0, 0]),
-        "upper": np.array([180, 255, 50])
-    }
+    "hsv_black": { "lower": np.array([0, 0, 0]), "upper": np.array([180, 255, 50]) }
 }
 start_event = threading.Event()
+stream_lock = threading.Lock()
 
-# --- Rotas da Interface Web ---
-
-@app.route('/start', methods=['POST'])
-def start_robot():
-    """ Recebe o comando de início da web e ativa o evento. """
-    start_event.set()
-    print("Evento de início ativado pela web.")
-    return jsonify(success=True)
-
-@app.route('/')
-def index():
-    """ Serve a página de calibração. """
-    with open('index.html', 'r') as f:
-        return render_template_string(f.read(), config=config)
-
-@app.route('/calibrate', methods=['POST'])
-def calibrate():
-    """ Recebe e aplica os novos parâmetros de calibração. """
-    data = request.json
-
-    # Atualiza PID
-    config['pid']['kp'] = float(data['kp'])
-    config['pid']['ki'] = float(data['ki'])
-    config['pid']['kd'] = float(data['kd'])
-
-    # Atualiza HSV Preto
-    config['hsv_black']['lower'] = np.array([int(data['h_min_black']), int(data['s_min_black']), int(data['v_min_black'])])
-    config['hsv_black']['upper'] = np.array([int(data['h_max_black']), int(data['s_max_black']), int(data['v_max_black'])])
-
-    # Salva a configuração em um arquivo JSON
-    save_config()
-
-    print(f"Novos parâmetros recebidos e salvos: {config}")
-    return jsonify(success=True)
-
-def save_config():
-    """ Salva o objeto de configuração em config.json. """
-    with open('config.json', 'w') as f:
-        config_to_save = {
-            'pid': config['pid'],
-            'hsv_black': {
-                'lower': config['hsv_black']['lower'].tolist(),
-                'upper': config['hsv_black']['upper'].tolist()
-            }
-        }
-        json.dump(config_to_save, f, indent=4)
-
-def load_config():
-    """ Carrega a configuração de config.json, se existir. """
-    if os.path.exists('config.json'):
-        with open('config.json', 'r') as f:
-            loaded_config = json.load(f)
-            config['pid'] = loaded_config['pid']
-            config['hsv_black']['lower'] = np.array(loaded_config['hsv_black']['lower'])
-            config['hsv_black']['upper'] = np.array(loaded_config['hsv_black']['upper'])
-            print("Configuração carregada de config.json")
-
-# Carrega a configuração ao iniciar
-load_config()
-
-# --- Lógica do Stream de Vídeo ---
-
+# --- Dados para o Stream ---
 last_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 last_mask = np.zeros((480, 640), dtype=np.uint8)
 path_history = []
 motor_speeds = {"left": 0, "right": 0}
 status_data = {}
-view_mode = 'normal' # 'normal', 'mask', 'contours'
-LOOKAHEAD_STEPS = 5
+view_mode = 'normal'
 
-@app.route('/set_view_mode', methods=['POST'])
-def set_view_mode():
-    global view_mode
-    view_mode = request.json.get('mode', 'normal')
-    return jsonify(success=True)
+# --- Funções de Controle ---
+def load_config():
+    if os.path.exists('config.json'):
+        with stream_lock:
+            with open('config.json', 'r') as f:
+                loaded_config = json.load(f)
+                config['pid'] = loaded_config['pid']
+                config['hsv_black']['lower'] = np.array(loaded_config['hsv_black']['lower'])
+                config['hsv_black']['upper'] = np.array(loaded_config['hsv_black']['upper'])
+                print("Configuração carregada de config.json")
+load_config()
+
+def save_config():
+    with stream_lock:
+        with open('config.json', 'w') as f:
+            config_to_save = {
+                'pid': config['pid'],
+                'hsv_black': {
+                    'lower': config['hsv_black']['lower'].tolist(),
+                    'upper': config['hsv_black']['upper'].tolist()
+                }
+            }
+            json.dump(config_to_save, f, indent=4)
 
 def update_stream_data(frame, mask, new_path_history, new_motor_speeds, new_status_data):
-    """ Atualiza todos os dados para o stream. """
-    global last_frame, last_mask, path_history, motor_speeds, status_data
-    last_frame = frame.copy()
-    last_mask = mask.copy()
-    path_history = new_path_history
-    motor_speeds = new_motor_speeds
-    status_data = new_status_data
+    with stream_lock:
+        global last_frame, last_mask, path_history, motor_speeds, status_data
+        last_frame = frame.copy()
+        last_mask = mask.copy()
+        path_history = list(new_path_history)
+        motor_speeds = dict(new_motor_speeds)
+        status_data = dict(new_status_data)
+
+# --- Rotas Flask ---
+@app.route('/')
+def index():
+    with open('index.html', 'r') as f:
+        return render_template_string(f.read(), config=config)
+
+@app.route('/start', methods=['POST'])
+def start_robot():
+    start_event.set()
+    return jsonify(success=True)
+
+@app.route('/calibrate', methods=['POST'])
+def calibrate():
+    data = request.json
+    with stream_lock:
+        config['pid']['kp'] = float(data['kp'])
+        config['pid']['ki'] = float(data['ki'])
+        config['pid']['kd'] = float(data['kd'])
+        config['hsv_black']['lower'] = np.array([int(data['h_min_black']), int(data['s_min_black']), int(data['v_min_black'])])
+        config['hsv_black']['upper'] = np.array([int(data['h_max_black']), int(data['s_max_black']), int(data['v_max_black'])])
+    save_config()
+    return jsonify(success=True)
+
+@app.route('/set_view_mode', methods=['POST'])
+def set_view_mode_route():
+    global view_mode
+    with stream_lock:
+        view_mode = request.json.get('mode', 'normal')
+    return jsonify(success=True)
 
 @app.route('/stream')
 def stream():
-    """ Gera o stream de vídeo. """
     def generate():
-        global last_frame, last_mask, view_mode
         while True:
-            output_frame = last_frame.copy()
+            with stream_lock:
+                output_frame = last_frame.copy()
+                current_path = list(path_history)
+                current_mask = last_mask.copy()
+                current_view = view_mode
+                current_status = dict(status_data)
+                current_speeds = dict(motor_speeds)
 
-            if view_mode == 'mask':
-                # Converte a máscara de um canal para 3 canais para ser exibível
-                output_frame = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
-            elif view_mode == 'contours':
-                contours, _ = cv2.findContours(last_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if current_view == 'mask':
+                output_frame = cv2.cvtColor(current_mask, cv2.COLOR_GRAY2BGR)
+            elif current_view == 'contours':
+                contours, _ = cv2.findContours(current_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 cv2.drawContours(output_frame, contours, -1, (0, 255, 0), 2)
 
-            # Adiciona o overlay de status (exceto na visualização de máscara pura)
-            if view_mode != 'mask':
-                 y_pos = 30
-                 if status_data:
-                     for key, value in status_data.items():
-                         text = f"{key}: {value}"
-                         cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                         y_pos += 20
-                 speed_text = f"L: {motor_speeds.get('left', 0):.1f} | R: {motor_speeds.get('right', 0):.1f}"
-                 cv2.putText(output_frame, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            for i in range(1, len(current_path)):
+                cv2.line(output_frame, current_path[i - 1], current_path[i], (255, 0, 0), 2)
+
+            if current_view != 'mask':
+                y_pos = 30
+                for key, value in current_status.items():
+                    text = f"{key}: {value}"
+                    cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    y_pos += 20
+                speed_text = f"L: {current_speeds.get('left', 0):.1f} | R: {current_speeds.get('right', 0):.1f}"
+                cv2.putText(output_frame, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             rotated_frame = cv2.rotate(output_frame, cv2.ROTATE_90_CLOCKWISE)
             ret, buffer = cv2.imencode('.jpg', rotated_frame)
-            if not ret:
-                continue
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
+            if not ret: continue
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 def run_stream():
-    """ Executa o servidor Flask. """
     app.run(host='0.0.0.0', port=5000)
