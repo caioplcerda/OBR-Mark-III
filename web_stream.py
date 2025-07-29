@@ -109,12 +109,28 @@ def stream():
 
             if current_view != 'mask':
                 y_pos = 30
-                for key, value in current_status.items():
-                    text = f"{key}: {value}"
-                    cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    y_pos += 20
+
+                # Desenha o status
+                if current_status:
+                    for key, value in current_status.items():
+                        # Formata valores booleanos e floats para melhor visualização
+                        if isinstance(value, bool):
+                            display_value = "Sim" if value else "Nao"
+                            color = (0, 255, 0) if value else (0, 0, 255)
+                        elif isinstance(value, float):
+                            display_value = f"{value:.2f}"
+                            color = (0, 255, 255)
+                        else:
+                            display_value = str(value)
+                            color = (0, 255, 255)
+
+                        text = f"{key}: {display_value}"
+                        cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                        y_pos += 20
+
+                # Desenha a velocidade
                 speed_text = f"L: {current_speeds.get('left', 0):.1f} | R: {current_speeds.get('right', 0):.1f}"
-                cv2.putText(output_frame, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             rotated_frame = cv2.rotate(output_frame, cv2.ROTATE_90_CLOCKWISE)
             ret, buffer = cv2.imencode('.jpg', rotated_frame)
