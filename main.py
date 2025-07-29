@@ -35,10 +35,12 @@ class Robot:
                 mask = np.zeros((480, 640), dtype=np.uint8)
 
                 if self.state == "WAITING":
-                    if not GPIO.input(self.hardware.START_BUTTON) or web_stream.start_command_received:
-                        if web_stream.start_command_received:
-                            web_stream.start_command_received = False
+                    if not GPIO.input(self.hardware.START_BUTTON) or web_stream.start_event.is_set():
+                        if web_stream.start_event.is_set():
+                            print("Comando da web recebido, iniciando percurso!")
+                            web_stream.start_event.clear() # Limpa o evento
                         else:
+                            print("Botão pressionado, iniciando percurso!")
                             time.sleep(0.5)
                         self.state = "FOLLOWING_LINE"
 
