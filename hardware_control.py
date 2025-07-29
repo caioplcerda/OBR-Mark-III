@@ -47,6 +47,9 @@ class HardwareControl:
         self.PWMB = 25
         self.STBY = 5
 
+        # === Pino para o Botão de Início ===
+        self.START_BUTTON = 4
+
         # === Pinos para os Encoders ===
         self.ENCODER_A_L = 6
         self.ENCODER_B_L = 13
@@ -63,6 +66,9 @@ class HardwareControl:
             GPIO.setup(pin, GPIO.OUT)
         GPIO.setup(self.PWMA, GPIO.OUT)
         GPIO.setup(self.PWMB, GPIO.OUT)
+
+        # Configura pino do botão
+        GPIO.setup(self.START_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         # Configura pinos do encoder
         GPIO.setup(self.ENCODER_A_L, GPIO.IN, pull_up_down=GPIO.PUD_UP)
