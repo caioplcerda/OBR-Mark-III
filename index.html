@@ -12,6 +12,16 @@
         .slider-group { margin-bottom: 15px; padding: 10px; border-radius: 5px; }
         .hsv-black { background-color: #333; color: white; }
         .view-controls button { margin-right: 10px; }
+        .log-container { margin-top: 20px; }
+        #log-console {
+            background-color: #111;
+            color: #0f0;
+            height: 300px;
+            overflow-y: scroll;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
     </style>
 </head>
 <body>
@@ -46,6 +56,10 @@
             <button type="submit">Salvar Calibração</button>
             <button type="button" id="start-button">Iniciar Percurso</button>
         </form>
+        <div class="log-container">
+            <h3>Console de Logs</h3>
+            <pre id="log-console"></pre>
+        </div>
     </div>
     <script>
         // ... (código do start-button e calibration-form) ...
@@ -62,8 +76,17 @@
         document.getElementById('view-mask').addEventListener('click', () => setViewMode('mask'));
         document.getElementById('view-contours').addEventListener('click', () => setViewMode('contours'));
 
-        // Atualiza a contagem de pixels (simulado, precisa de websocket para ser em tempo real)
-        // Por enquanto, vamos deixar a lógica de atualização no overlay do vídeo.
+        function fetchLogs() {
+            fetch('/logs')
+                .then(response => response.json())
+                .then(data => {
+                    const logConsole = document.getElementById('log-console');
+                    logConsole.textContent = data.logs.join('\\n');
+                    logConsole.scrollTop = logConsole.scrollHeight; // Auto-scroll para o final
+                });
+        }
+
+        setInterval(fetchLogs, 2000); // Atualiza os logs a cada 2 segundos
     </script>
 </body>
 </html>

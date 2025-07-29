@@ -3,6 +3,7 @@ import numpy as np
 import os
 import json
 import threading
+import time
 from flask import Flask, Response, render_template_string, request, jsonify
 
 app = Flask(__name__)
@@ -15,15 +16,25 @@ config = {
 start_event = threading.Event()
 stream_lock = threading.Lock()
 
-# --- Dados para o Stream ---
+# --- Dados para o Stream e Logs ---
 last_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 last_mask = np.zeros((480, 640), dtype=np.uint8)
 path_history = []
 motor_speeds = {"left": 0, "right": 0}
 status_data = {}
 view_mode = 'normal'
+logs = []
+MAX_LOGS = 20
 
 # --- Funções de Controle ---
+def log(message):
+    """ Adiciona uma mensagem ao log global. """
+    with stream_lock:
+        timestamp = time.strftime("%H:%M:%S")
+        logs.append(f"[{timestamp}] {message}")
+        if len(logs) > MAX_LOGS:
+            logs.pop(0)
+
 def load_config():
     if os.path.exists('config.json'):
         with stream_lock:
@@ -85,6 +96,12 @@ def set_view_mode_route():
     with stream_lock:
         view_mode = request.json.get('mode', 'normal')
     return jsonify(success=True)
+
+@app.route('/logs')
+def get_logs():
+    """ Fornece os logs em formato JSON. """
+    with stream_lock:
+        return jsonify(logs=list(logs))
 
 @app.route('/stream')
 def stream():
