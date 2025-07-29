@@ -35,10 +35,23 @@
                 <label>S_max: <input type="range" name="s_max_black" min="0" max="255" value="{{ config.hsv_black.upper[1] }}"></label><br>
                 <label>V_max: <input type="range" name="v_max_black" min="0" max="255" value="{{ config.hsv_black.upper[2] }}"></label><br>
             </div>
-            <button type="submit">Salvar</button>
+            <button type="submit">Salvar Calibração</button>
+            <button type="button" id="start-button">Iniciar Percurso</button>
         </form>
     </div>
     <script>
+        document.getElementById('start-button').addEventListener('click', function() {
+            fetch('/start', { method: 'POST' })
+                .then(response => response.json())
+                _                .then(data => {
+                    if (data.success) {
+                        alert('Comando de início enviado!');
+                    } else {
+                        alert('Erro ao enviar comando.');
+                    }
+                });
+        });
+
         document.getElementById('calibration-form').addEventListener('submit', function(event) {
             event.preventDefault();
             const formData = new FormData(event.target);

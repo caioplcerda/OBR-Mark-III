@@ -7,7 +7,7 @@ from hardware_control import HardwareControl
 from vision import Vision
 from line_follower import LineFollower
 from rescue import Rescue
-from web_stream import run_stream, update_frame, config
+from web_stream import run_stream, update_frame, config, start_command_received
 
 class Robot:
     """ Classe principal que orquestra o robô. """
@@ -38,11 +38,18 @@ class Robot:
                 if self.state == "WAITING":
                     status = "Aguardando início..."
                     path_history = []
-                    # Verifica se o botão foi pressionado (pino em LOW por causa do pull-up)
-                    if not GPIO.input(self.hardware.START_BUTTON):
-                        print("Botão pressionado, iniciando percurso!")
+
+                    # Verifica o botão físico OU o comando da web
+                    if not GPIO.input(self.hardware.START_BUTTON) or start_command_received:
+                        if start_command_received:
+                            print("Comando da web recebido, iniciando percurso!")
+                            # Reseta a flag
+                            start_command_received = False
+                        else:
+                            print("Botão pressionado, iniciando percurso!")
+                            time.sleep(0.5) # Debounce do botão
+
                         self.state = "FOLLOWING_LINE"
-                        time.sleep(0.5) # Debounce do botão
 
                 elif self.state == "FOLLOWING_LINE":
                     cx, silver_detected, red_detected, obstacle, intersection, _, curvature = self.vision.detect_line_features(frame)

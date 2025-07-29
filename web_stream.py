@@ -6,7 +6,7 @@ import json
 
 app = Flask(__name__)
 
-# Objeto de configuração para compartilhar os parâmetros
+# Objeto de configuração e comando de início
 config = {
     "pid": {"kp": 0.4, "ki": 0.0, "kd": 0.1},
     "hsv_black": {
@@ -14,8 +14,17 @@ config = {
         "upper": np.array([180, 255, 50])
     }
 }
+start_command_received = False
 
 # --- Rotas da Interface Web ---
+
+@app.route('/start', methods=['POST'])
+def start_robot():
+    """ Recebe o comando de início da web. """
+    global start_command_received
+    start_command_received = True
+    print("Comando de início recebido da web.")
+    return jsonify(success=True)
 
 @app.route('/')
 def index():
