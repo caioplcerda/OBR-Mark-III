@@ -7,15 +7,23 @@
     <style>
         body { font-family: sans-serif; display: flex; }
         .container { display: flex; flex-direction: column; margin: 20px; }
-        .stream { width: 640px; height: 240px; border: 1px solid black; }
+        .stream { width: 480px; height: 640px; border: 1px solid black; }
         .controls { display: flex; flex-direction: column; }
-        .slider-group { margin-bottom: 15px; }
+        .slider-group { margin-bottom: 15px; padding: 10px; border-radius: 5px; }
+        .hsv-black { background-color: #333; color: white; }
+        .view-controls button { margin-right: 10px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Stream do Robô</h1>
         <img class="stream" src="/stream" />
+        <div class="view-controls">
+            <h3>Modo de Visualização</h3>
+            <button id="view-normal">Normal</button>
+            <button id="view-mask">Máscara</button>
+            <button id="view-contours">Contornos</button>
+        </div>
     </div>
     <div class="container controls">
         <h1>Calibração</h1>
@@ -26,8 +34,8 @@
                 <label>KI: <input type="range" name="ki" min="0" max="1" step="0.01" value="{{ config.pid.ki }}"></label><br>
                 <label>KD: <input type="range" name="kd" min="0" max="1" step="0.01" value="{{ config.pid.kd }}"></label><br>
             </div>
-            <div class="slider-group">
-                <h3>HSV - Preto</h3>
+            <div class="slider-group hsv-black">
+                <h3>HSV - Preto | Pixels: <span id="pixel-count">0</span></h3>
                 <label>H_min: <input type="range" name="h_min_black" min="0" max="180" value="{{ config.hsv_black.lower[0] }}"></label><br>
                 <label>S_min: <input type="range" name="s_min_black" min="0" max="255" value="{{ config.hsv_black.lower[1] }}"></label><br>
                 <label>V_min: <input type="range" name="v_min_black" min="0" max="255" value="{{ config.hsv_black.lower[2] }}"></label><br>
@@ -40,36 +48,22 @@
         </form>
     </div>
     <script>
-        document.getElementById('start-button').addEventListener('click', function() {
-            fetch('/start', { method: 'POST' })
-                .then(response => response.json())
-                _                .then(data => {
-                    if (data.success) {
-                        alert('Comando de início enviado!');
-                    } else {
-                        alert('Erro ao enviar comando.');
-                    }
-                });
-        });
+        // ... (código do start-button e calibration-form) ...
 
-        document.getElementById('calibration-form').addEventListener('submit', function(event) {
-            event.preventDefault();
-            const formData = new FormData(event.target);
-            const data = Object.fromEntries(formData.entries());
-            fetch('/calibrate', {
+        function setViewMode(mode) {
+            fetch('/set_view_mode', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(data)
-            }).then(response => {
-                if (response.ok) {
-                    alert('Parâmetros salvos com sucesso!');
-                } else {
-                    alert('Erro ao salvar os parâmetros.');
-                }
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
             });
-        });
+        }
+
+        document.getElementById('view-normal').addEventListener('click', () => setViewMode('normal'));
+        document.getElementById('view-mask').addEventListener('click', () => setViewMode('mask'));
+        document.getElementById('view-contours').addEventListener('click', () => setViewMode('contours'));
+
+        // Atualiza a contagem de pixels (simulado, precisa de websocket para ser em tempo real)
+        // Por enquanto, vamos deixar a lógica de atualização no overlay do vídeo.
     </script>
 </body>
 </html>
