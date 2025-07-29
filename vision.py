@@ -28,7 +28,6 @@ class Vision:
 
     def detect_line_features(self, frame):
         """ Detecta características da linha, como centroide, interseções e obstáculos. """
-        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         lower_black = self.config['hsv_black']['lower']
@@ -86,7 +85,6 @@ class Vision:
 
     def detect_balls(self, frame):
         """ Detecta as bolas de resgate (prateadas e pretas). """
-        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask_silver = cv2.inRange(hsv, self.LOWER_SILVER, self.UPPER_SILVER)
         mask_black = cv2.inRange(hsv, self.LOWER_BLACK, self.UPPER_BLACK)
