@@ -72,7 +72,10 @@ class Vision:
         if centroids['top'] != -1 and centroids['bottom'] != -1:
             curvature = centroids['top'] - centroids['bottom']
 
-        return cx, silver_detected, red_detected, obstacle, intersection, centroids, curvature
+        # Contagem de pixels na máscara preta
+        pixel_count = cv2.countNonZero(mask_black)
+
+        return cx, silver_detected, red_detected, obstacle, intersection, centroids, curvature, mask_black, pixel_count
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """

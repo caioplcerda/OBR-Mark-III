@@ -79,17 +79,25 @@ load_config()
 
 # --- Lógica do Stream de Vídeo ---
 
-last_frame = np.zeros((240, 640, 3), dtype=np.uint8)
+last_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+last_mask = np.zeros((480, 640), dtype=np.uint8)
 path_history = []
 motor_speeds = {"left": 0, "right": 0}
 status_data = {}
+view_mode = 'normal' # 'normal', 'mask', 'contours'
 LOOKAHEAD_STEPS = 5
 
-def update_stream_data(frame, new_path_history, new_motor_speeds, new_status_data):
+@app.route('/set_view_mode', methods=['POST'])
+def set_view_mode():
+    global view_mode
+    view_mode = request.json.get('mode', 'normal')
+    return jsonify(success=True)
+
+def update_stream_data(frame, mask, new_path_history, new_motor_speeds, new_status_data):
     """ Atualiza todos os dados para o stream. """
-    global last_frame, path_history, motor_speeds, status_data
-    # Garante que estamos passando uma cópia para evitar race conditions
+    global last_frame, last_mask, path_history, motor_speeds, status_data
     last_frame = frame.copy()
+    last_mask = mask.copy()
     path_history = new_path_history
     motor_speeds = new_motor_speeds
     status_data = new_status_data
@@ -98,25 +106,29 @@ def update_stream_data(frame, new_path_history, new_motor_speeds, new_status_dat
 def stream():
     """ Gera o stream de vídeo. """
     def generate():
-        global last_frame, motor_speeds, status_data
+        global last_frame, last_mask, view_mode
         while True:
-            overlay = last_frame.copy()
+            output_frame = last_frame.copy()
 
-            # Adiciona informações de status ao overlay
-            y_pos = 30
-            if status_data:
-                for key, value in status_data.items():
-                    text = f"{key}: {value}"
-                    cv2.putText(overlay, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    y_pos += 20
+            if view_mode == 'mask':
+                # Converte a máscara de um canal para 3 canais para ser exibível
+                output_frame = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
+            elif view_mode == 'contours':
+                contours, _ = cv2.findContours(last_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(output_frame, contours, -1, (0, 255, 0), 2)
 
-            # Adiciona o texto de velocidade dos motores
-            speed_text = f"L: {motor_speeds.get('left', 0):.1f} | R: {motor_speeds.get('right', 0):.1f}"
-            cv2.putText(overlay, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # Adiciona o overlay de status (exceto na visualização de máscara pura)
+            if view_mode != 'mask':
+                 y_pos = 30
+                 if status_data:
+                     for key, value in status_data.items():
+                         text = f"{key}: {value}"
+                         cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                         y_pos += 20
+                 speed_text = f"L: {motor_speeds.get('left', 0):.1f} | R: {motor_speeds.get('right', 0):.1f}"
+                 cv2.putText(output_frame, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            # Rotaciona o frame final para exibição
-            rotated_frame = cv2.rotate(overlay, cv2.ROTATE_90_CLOCKWISE)
-
+            rotated_frame = cv2.rotate(output_frame, cv2.ROTATE_90_CLOCKWISE)
             ret, buffer = cv2.imencode('.jpg', rotated_frame)
             if not ret:
                 continue
