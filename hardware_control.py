@@ -60,6 +60,10 @@ class HardwareControl:
         self.encoder_ticks_l = 0
         self.encoder_ticks_r = 0
 
+        # === Últimas velocidades definidas ===
+        self.last_left_speed = 0
+        self.last_right_speed = 0
+
         GPIO.setmode(GPIO.BCM)
         # Configura pinos do motor
         for pin in [self.AIN1, self.AIN2, self.BIN1, self.BIN2, self.STBY]:
@@ -107,6 +111,9 @@ class HardwareControl:
 
         left_speed = base_speed - correction
         right_speed = base_speed + correction
+
+        self.last_left_speed = left_speed
+        self.last_right_speed = right_speed
 
         # Controle do Motor A (Esquerdo)
         if left_speed > 0:

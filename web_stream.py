@@ -81,22 +81,43 @@ load_config()
 
 last_frame = np.zeros((240, 640, 3), dtype=np.uint8)
 path_history = []
+motor_speeds = {"left": 0, "right": 0}
+status_data = {}
 LOOKAHEAD_STEPS = 5
 
-def update_frame(frame, new_path_history):
-    """ Atualiza o frame para o stream. """
-    global last_frame, path_history
-    last_frame = frame
+def update_stream_data(frame, new_path_history, new_motor_speeds, new_status_data):
+    """ Atualiza todos os dados para o stream. """
+    global last_frame, path_history, motor_speeds, status_data
+    # Garante que estamos passando uma cópia para evitar race conditions
+    last_frame = frame.copy()
     path_history = new_path_history
+    motor_speeds = new_motor_speeds
+    status_data = new_status_data
 
 @app.route('/stream')
 def stream():
     """ Gera o stream de vídeo. """
     def generate():
-        global last_frame
+        global last_frame, motor_speeds, status_data
         while True:
-            # ... (lógica de overlay permanece a mesma) ...
-            ret, buffer = cv2.imencode('.jpg', last_frame)
+            overlay = last_frame.copy()
+
+            # Adiciona informações de status ao overlay
+            y_pos = 30
+            if status_data:
+                for key, value in status_data.items():
+                    text = f"{key}: {value}"
+                    cv2.putText(overlay, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    y_pos += 20
+
+            # Adiciona o texto de velocidade dos motores
+            speed_text = f"L: {motor_speeds.get('left', 0):.1f} | R: {motor_speeds.get('right', 0):.1f}"
+            cv2.putText(overlay, speed_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Rotaciona o frame final para exibição
+            rotated_frame = cv2.rotate(overlay, cv2.ROTATE_90_CLOCKWISE)
+
+            ret, buffer = cv2.imencode('.jpg', rotated_frame)
             if not ret:
                 continue
             yield (b'--frame\r\n'
