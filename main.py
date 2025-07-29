@@ -37,10 +37,10 @@ class Robot:
                 if self.state == "WAITING":
                     if not GPIO.input(self.hardware.START_BUTTON) or web_stream.start_event.is_set():
                         if web_stream.start_event.is_set():
-                            print("Comando da web recebido, iniciando percurso!")
-                            web_stream.start_event.clear() # Limpa o evento
+                            web_stream.log("Comando da web recebido, iniciando.")
+                            web_stream.start_event.clear()
                         else:
-                            print("Botão pressionado, iniciando percurso!")
+                            web_stream.log("Botão físico pressionado, iniciando.")
                             time.sleep(0.5)
                         self.state = "FOLLOWING_LINE"
 
@@ -60,12 +60,14 @@ class Robot:
                     })
 
                 elif self.state == "INTERSECTION":
+                    web_stream.log("Interseção detectada. Parando e seguindo em frente.")
                     self.hardware.stop()
                     time.sleep(1)
                     self.hardware.set_motor_speed(50, 0)
                     self.state = "FOLLOWING_LINE"
 
                 elif self.state == "AVOIDING_OBSTACLE":
+                    web_stream.log("Obstáculo detectado. Desviando.")
                     self.hardware.set_motor_speed(40, 100)
                     time.sleep(0.5)
                     self.hardware.set_motor_speed(50, 0)
@@ -73,10 +75,12 @@ class Robot:
                     self.state = "FOLLOWING_LINE"
 
                 elif self.state == "RESCUE":
+                    web_stream.log("Entrando no modo de resgate.")
                     self.rescue.execute_rescue()
                     self.state = "FINISHING"
 
                 elif self.state == "FINISHING":
+                    web_stream.log("Linha de chegada detectada. Finalizando.")
                     self.hardware.stop()
                     time.sleep(5)
                     break
