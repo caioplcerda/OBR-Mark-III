@@ -8,10 +8,11 @@ from hardware_control import HardwareControl
 from vision import Vision
 from line_follower import LineFollower
 from rescue import Rescue
-from web_stream import SHARED_STATE, log, run_stream
+from web_stream import SHARED_STATE, run_stream
 
 class Robot:
-    def __init__(self):
+    def __init__(self, log_function):
+        self.log = log_function
         self.picam2 = Picamera2()
         self.picam2.configure(self.picam2.create_preview_configuration(main={"format": 'RGB888', "size": (640, 480)}))
         self.picam2.start()
@@ -44,12 +45,13 @@ class Robot:
                 mask = np.zeros((480, 640), dtype=np.uint8)
 
                 if self.state == "WAITING":
+                    self.log("Aguardando inicio...")
                     if SHARED_STATE['start_event'].is_set():
-                        log("Comando da web recebido, iniciando.")
+                        self.log("Comando da web recebido, iniciando.")
                         SHARED_STATE['start_event'].clear()
                         self.state = "FOLLOWING_LINE"
                     elif not GPIO.input(self.hardware.START_BUTTON):
-                        log("Botão físico pressionado, iniciando.")
+                        self.log("Botão físico pressionado, iniciando.")
                         time.sleep(0.5)
                         self.state = "FOLLOWING_LINE"
 
@@ -72,7 +74,8 @@ class Robot:
             self.hardware.cleanup()
 
 if __name__ == '__main__':
-    robot = Robot()
+    from web_stream import log
+    robot = Robot(log_function=log)
     stream_thread = threading.Thread(target=run_stream)
     stream_thread.daemon = True
     stream_thread.start()

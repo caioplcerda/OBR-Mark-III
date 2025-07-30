@@ -21,6 +21,7 @@
             padding: 10px;
             border-radius: 5px;
             font-family: monospace;
+            white-space: pre-wrap;
         }
     </style>
 </head>
@@ -38,21 +39,7 @@
     <div class="container controls">
         <h1>Calibração</h1>
         <form id="calibration-form">
-            <div class="slider-group">
-                <h3>PID</h3>
-                <label>KP: <input type="range" name="kp" min="0" max="1" step="0.01" value="{{ config.pid.kp }}"></label><br>
-                <label>KI: <input type="range" name="ki" min="0" max="1" step="0.01" value="{{ config.pid.ki }}"></label><br>
-                <label>KD: <input type="range" name="kd" min="0" max="1" step="0.01" value="{{ config.pid.kd }}"></label><br>
-            </div>
-            <div class="slider-group hsv-black">
-                <h3>HSV - Preto | Pixels: <span id="pixel-count">0</span></h3>
-                <label>H_min: <input type="range" name="h_min_black" min="0" max="180" value="{{ config.hsv_black.lower[0] }}"></label><br>
-                <label>S_min: <input type="range" name="s_min_black" min="0" max="255" value="{{ config.hsv_black.lower[1] }}"></label><br>
-                <label>V_min: <input type="range" name="v_min_black" min="0" max="255" value="{{ config.hsv_black.lower[2] }}"></label><br>
-                <label>H_max: <input type="range" name="h_max_black" min="0" max="180" value="{{ config.hsv_black.upper[0] }}"></label><br>
-                <label>S_max: <input type="range" name="s_max_black" min="0" max="255" value="{{ config.hsv_black.upper[1] }}"></label><br>
-                <label>V_max: <input type="range" name="v_max_black" min="0" max="255" value="{{ config.hsv_black.upper[2] }}"></label><br>
-            </div>
+            <!-- ... sliders ... -->
             <button type="submit">Salvar Calibração</button>
             <button type="button" id="start-button">Iniciar Percurso</button>
         </form>
@@ -62,7 +49,20 @@
         </div>
     </div>
     <script>
-        // ... (código do start-button e calibration-form) ...
+    document.addEventListener('DOMContentLoaded', (event) => {
+
+        document.getElementById('start-button').addEventListener('click', () => fetch('/start', { method: 'POST' }));
+
+        document.getElementById('calibration-form').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const data = Object.fromEntries(formData.entries());
+            fetch('/calibrate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+        });
 
         function setViewMode(mode) {
             fetch('/set_view_mode', {
@@ -81,12 +81,16 @@
                 .then(response => response.json())
                 .then(data => {
                     const logConsole = document.getElementById('log-console');
-                    logConsole.textContent = data.logs.join('\\n');
-                    logConsole.scrollTop = logConsole.scrollHeight; // Auto-scroll para o final
+                    const newContent = data.logs.join('<br>');
+                    if (logConsole.innerHTML !== newContent) {
+                        logConsole.innerHTML = newContent;
+                        logConsole.scrollTop = logConsole.scrollHeight;
+                    }
                 });
         }
 
-        setInterval(fetchLogs, 2000); // Atualiza os logs a cada 2 segundos
+        setInterval(fetchLogs, 1500);
+    });
     </script>
 </body>
 </html>
