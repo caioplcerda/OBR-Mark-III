@@ -108,8 +108,23 @@
         if (videoStream) {
             videoStream.addEventListener('click', function(e) {
                 const rect = videoStream.getBoundingClientRect();
-                const x = Math.round(e.clientX - rect.left);
-                const y = Math.round(e.clientY - rect.top);
+
+                // As dimensões originais da imagem do robô
+                const originalWidth = 640;
+                const originalHeight = 480;
+
+                // As dimensões atuais do elemento <img> no navegador
+                const displayWidth = rect.width;
+                const displayHeight = rect.height;
+
+                // Calcula a posição do clique como uma proporção do tamanho exibido
+                const x_ratio = (e.clientX - rect.left) / displayWidth;
+                const y_ratio = (e.clientY - rect.top) / displayHeight;
+
+                // Dimensiona a proporção para as dimensões originais da imagem
+                const x = Math.round(x_ratio * originalWidth);
+                const y = Math.round(y_ratio * originalHeight);
+
                 const color = colorToCalibrate.value;
                 sendCommand('calibrate_pixel', { x, y, color });
             });

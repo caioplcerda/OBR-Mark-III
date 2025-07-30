@@ -47,120 +47,129 @@ class Robot:
     def run(self):
         try:
             while True:
-                frame_4chan = self.picam2.capture_array()
-                frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
-                frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                try:
+                    frame_4chan = self.picam2.capture_array()
+                    frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
+                    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                cal_req = SHARED_STATE.get('calibration_request')
-                if cal_req:
-                    self.vision.calibrate_by_click(frame, cal_req['x'], cal_req['y'], cal_req['color'])
-                    SHARED_STATE['calibration_request'] = None
+                    cal_req = SHARED_STATE.get('calibration_request')
+                    if cal_req:
+                        self.vision.calibrate_by_click(frame, cal_req['x'], cal_req['y'], cal_req['color'])
+                        SHARED_STATE['calibration_request'] = None
 
-                path_history = []
-                status_data = {"fsm_state": self.state}
-                mask = np.zeros((480, 640), dtype=np.uint8)
-                derivative_data = None
+                    path_history = []
+                    status_data = {"fsm_state": self.state}
+                    mask = np.zeros((480, 640), dtype=np.uint8)
+                    derivative_data = None
 
-                if self.state == "WAITING":
-                    if SHARED_STATE['start_event'].is_set():
-                        self.log("Comando da web recebido, iniciando.")
-                        SHARED_STATE['start_event'].clear()
-                        self.state = "FOLLOWING_LINE"
-                    elif not GPIO.input(self.hardware.START_BUTTON):
-                        self.log("Botão físico pressionado, iniciando.")
-                        time.sleep(0.5)
-                        self.state = "FOLLOWING_LINE"
+                    if self.state == "WAITING":
+                        if SHARED_STATE['start_event'].is_set():
+                            self.log("Comando da web recebido, iniciando.")
+                            SHARED_STATE['start_event'].clear()
+                            self.state = "FOLLOWING_LINE"
+                        elif not GPIO.input(self.hardware.START_BUTTON):
+                            self.log("Botão físico pressionado, iniciando.")
+                            time.sleep(0.5)
+                            self.state = "FOLLOWING_LINE"
 
-                elif self.state == "FOLLOWING_LINE":
-                    # --- Advanced Line Detection Sequence ---
-                    scan_points = []
-                    last_scan_center = None
+                    elif self.state == "FOLLOWING_LINE":
+                        # --- Advanced Line Detection Sequence ---
+                        scan_points = []
+                        last_scan_center = None
 
-                    # 1. First scan (scanline) to find the line near the robot
-                    scan_y = frame.shape[0] - 60
-                    scan_center_0 = (frame.shape[1] // 2, scan_y)
-                    scan_radius_0 = frame.shape[1] // 2 # Scan the whole width
-                    scandata, start_x = adv_vision.scanline(frame_gray, scan_center_0, scan_radius_0)
-                    scan_details = {'center_point': scan_center_0, 'radius': scan_radius_0}
-                    p0, deriv0 = adv_vision.find_line_from_scan(scandata, start_x, 'line', scan_details)
+                        # 1. First scan (scanline) to find the line near the robot
+                        scan_y = frame.shape[0] - 60
+                        scan_center_0 = (frame.shape[1] // 2, scan_y)
+                        scan_radius_0 = frame.shape[1] // 2 # Scan the whole width
+                        scandata, start_x = adv_vision.scanline(frame_gray, scan_center_0, scan_radius_0)
+                        scan_details = {'center_point': scan_center_0, 'radius': scan_radius_0}
+                        p0, deriv0 = adv_vision.find_line_from_scan(scandata, start_x, 'line', scan_details)
 
-                    if p0:
-                        scan_points.append(p0)
-                        last_scan_center = p0
-                        derivative_data = deriv0 # Save first derivative for visualization
+                        if p0:
+                            scan_points.append(p0)
+                            last_scan_center = p0
+                            derivative_data = deriv0 # Save first derivative for visualization
 
-                        # 2. Subsequent scans (scancircle) to predict the path
-                        num_scans = 4
-                        scan_radius = 30
-                        look_width = 180
-                        current_look_angle = self.last_line_angle
+                            # 2. Subsequent scans (scancircle) to predict the path
+                            num_scans = 4
+                            scan_radius = 30
+                            look_width = 180
+                            current_look_angle = self.last_line_angle
 
-                        for i in range(num_scans):
-                            if not last_scan_center: break
+                            for i in range(num_scans):
+                                if not last_scan_center: break
 
-                            scandata, angles = adv_vision.scancircle(frame_gray, last_scan_center, scan_radius, current_look_angle, look_width)
-                            scan_details = {'center_point': last_scan_center, 'radius': scan_radius}
-                            p_next, deriv_next = adv_vision.find_line_from_scan(scandata, angles, 'circle', scan_details)
+                                scandata, angles = adv_vision.scancircle(frame_gray, last_scan_center, scan_radius, current_look_angle, look_width)
+                                scan_details = {'center_point': last_scan_center, 'radius': scan_radius}
+                                p_next, deriv_next = adv_vision.find_line_from_scan(scandata, angles, 'circle', scan_details)
 
-                            if p_next:
-                                current_look_angle = adv_vision.line_angle_from_points(last_scan_center, p_next)
-                                scan_points.append(p_next)
-                                last_scan_center = p_next
-                            else:
-                                break
+                                if p_next:
+                                    current_look_angle = adv_vision.line_angle_from_points(last_scan_center, p_next)
+                                    scan_points.append(p_next)
+                                    last_scan_center = p_next
+                                else:
+                                    break
 
-                    # 3. Update state and calculate motor error
-                    if len(scan_points) > 1:
-                        self.line_points.extendleft(scan_points)
-                        self.last_line_angle = adv_vision.line_angle_from_points(scan_points[0], scan_points[-1])
+                        # 3. Update state and calculate motor error
+                        if len(scan_points) > 1:
+                            self.line_points.extendleft(scan_points)
+                            self.last_line_angle = adv_vision.line_angle_from_points(scan_points[0], scan_points[-1])
 
-                        # Use a point further down the path for the final error sent to the controller
-                        look_ahead_point_index = min(len(scan_points) - 1, 2)
-                        error_final = scan_points[look_ahead_point_index][0] - self.vision.CENTER_X
+                            # Use a point further down the path for the final error sent to the controller
+                            look_ahead_point_index = min(len(scan_points) - 1, 2)
+                            error_final = scan_points[look_ahead_point_index][0] - self.vision.CENTER_X
 
-                        base_speed = 50
-                        self.hardware.set_motor_speed(base_speed, error_final)
+                            base_speed = 50
+                            self.hardware.set_motor_speed(base_speed, error_final)
 
-                        path_history = scan_points
-                        status_data.update({"error": error_final, "angle": self.last_line_angle})
-                    else:
+                            path_history = scan_points
+                            status_data.update({"error": error_final, "angle": self.last_line_angle})
+                        else:
+                            self.hardware.stop()
+                            status_data.update({"error": "Line Lost"})
+
+                        # Basic detection for intersections, etc. (can be improved)
+                        _, silver, red, obstacle, intersection, _, _, _, _ = self.vision.detect_line_features(frame)
+                        if red: self.state = "FINISHING"
+                        elif silver: self.state = "RESCUE"
+
+                    elif self.state == "INTERSECTION":
+                        self.log("Interseção detectada. Parando e seguindo em frente.")
                         self.hardware.stop()
-                        status_data.update({"error": "Line Lost"})
+                        time.sleep(1)
+                        self.hardware.set_motor_speed(50, 0)
+                        self.state = "FOLLOWING_LINE"
 
-                    # Basic detection for intersections, etc. (can be improved)
-                    _, silver, red, obstacle, intersection, _, _, _, _ = self.vision.detect_line_features(frame)
-                    if red: self.state = "FINISHING"
-                    elif silver: self.state = "RESCUE"
+                    elif self.state == "AVOIDING_OBSTACLE":
+                        self.log("Obstáculo detectado. Desviando.")
+                        self.hardware.set_motor_speed(40, 100)
+                        time.sleep(0.5)
+                        self.hardware.set_motor_speed(50, 0)
+                        time.sleep(1)
+                        self.state = "FOLLOWING_LINE"
 
-                elif self.state == "INTERSECTION":
-                    self.log("Interseção detectada. Parando e seguindo em frente.")
+                    elif self.state == "RESCUE":
+                        self.log("Entrando no modo de resgate.")
+                        self.rescue.execute_rescue()
+                        self.state = "FINISHING"
+
+                    elif self.state == "FINISHING":
+                        self.log("Linha de chegada detectada. Finalizando.")
+                        self.hardware.stop()
+                        time.sleep(5)
+                        break
+
+                    speeds = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
+                    self.update_stream_data(frame, mask, path_history, speeds, status_data, derivative_data)
+                    time.sleep(0.05)
+
+                except Exception as e:
+                    self.log(f"ERRO NO LAÇO PRINCIPAL: {e}")
+                    self.log("O robô irá parar por segurança. Reinicie o programa.")
                     self.hardware.stop()
+                    # We could break here, but sleeping allows the stream to continue
                     time.sleep(1)
-                    self.hardware.set_motor_speed(50, 0)
-                    self.state = "FOLLOWING_LINE"
 
-                elif self.state == "AVOIDING_OBSTACLE":
-                    self.log("Obstáculo detectado. Desviando.")
-                    self.hardware.set_motor_speed(40, 100)
-                    time.sleep(0.5)
-                    self.hardware.set_motor_speed(50, 0)
-                    time.sleep(1)
-                    self.state = "FOLLOWING_LINE"
-
-                elif self.state == "RESCUE":
-                    self.log("Entrando no modo de resgate.")
-                    self.rescue.execute_rescue()
-                    self.state = "FINISHING"
-
-                elif self.state == "FINISHING":
-                    self.log("Linha de chegada detectada. Finalizando.")
-                    self.hardware.stop()
-                    time.sleep(5)
-                    break
-
-                speeds = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
-                self.update_stream_data(frame, mask, path_history, speeds, status_data, derivative_data)
-                time.sleep(0.05)
 
         except KeyboardInterrupt:
             self.hardware.cleanup()
