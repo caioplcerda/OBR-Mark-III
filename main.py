@@ -28,14 +28,19 @@ class Robot:
         self.line_points = deque(maxlen=20)
         self.last_line_angle = -90.0  # Start by looking straight up (-90 deg)
 
-    def update_stream_data(self, frame, mask, path_history, speeds, status_data, derivative_scan=None):
+    def update_stream_data(self, frame, mask=None, path_history=None, speeds=None, status_data=None, derivative_scan=None):
         with SHARED_STATE['stream_lock']:
             s_data = SHARED_STATE['stream_data']
             s_data['last_frame'] = frame.copy()
-            s_data['last_mask'] = mask.copy()
-            s_data['path_history'] = list(path_history)
-            s_data['motor_speeds'] = dict(speeds)
-            s_data['status_data'] = dict(status_data)
+            # Only update other data if it's provided, making the function more robust
+            if mask is not None:
+                s_data['last_mask'] = mask.copy()
+            if path_history is not None:
+                s_data['path_history'] = list(path_history)
+            if speeds is not None:
+                s_data['motor_speeds'] = dict(speeds)
+            if status_data is not None:
+                s_data['status_data'] = dict(status_data)
             if derivative_scan is not None:
                 s_data['derivative_scan'] = derivative_scan
 
