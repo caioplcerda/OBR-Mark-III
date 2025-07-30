@@ -97,7 +97,7 @@ class Vision:
         if color_name == 'black':
             self.config['hsv_black']['lower'] = lower_bound
             self.config['hsv_black']['upper'] = upper_bound
-            log(f"Nova calibração para PRETO: {lower_bound} a {upper_bound}")
+            self.log(f"Nova calibração para PRETO: {lower_bound} a {upper_bound}")
 
         # Adicionar lógica para outras cores (verde, etc.) aqui se necessário
 

@@ -5,8 +5,10 @@ import json
 import threading
 import time
 from flask import Flask, Response, render_template_string, request, jsonify
+from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
+socketio = SocketIO(app, async_mode='threading')
 
 # --- Dicionário de Estado Global Compartilhado ---
 SHARED_STATE = {
@@ -16,8 +18,6 @@ SHARED_STATE = {
     },
     "start_event": threading.Event(),
     "stream_lock": threading.Lock(),
-    "logs": [],
-    "MAX_LOGS": 20,
     "stream_data": {
         "last_frame": np.zeros((480, 640, 3), dtype=np.uint8),
         "last_mask": np.zeros((480, 640), dtype=np.uint8),
@@ -31,42 +31,15 @@ SHARED_STATE = {
 
 # --- Funções de Logging ---
 def log(message):
-    with SHARED_STATE["stream_lock"]:
-        timestamp = time.strftime("%H:%M:%S")
-        SHARED_STATE["logs"].append(f"[{timestamp}] {message}")
-        if len(SHARED_STATE["logs"]) > SHARED_STATE["MAX_LOGS"]:
-            SHARED_STATE["logs"].pop(0)
+    timestamp = time.strftime("%H:%M:%S")
+    full_message = f"[{timestamp}] {message}"
+    print(full_message)  # Mantém o log no console do servidor
+    socketio.emit('log_message', {'data': full_message})
 
 # --- Rotas Flask ---
 @app.route('/')
 def index():
     return render_template_string(open('index.html').read(), config=SHARED_STATE['config'])
-
-@app.route('/command', methods=['POST'])
-def command_route():
-    data = request.json
-    command = data.get('command')
-
-    if command == 'start_robot':
-        SHARED_STATE['start_event'].set()
-        log("Comando 'start_robot' recebido.")
-    elif command == 'set_view_mode':
-        with SHARED_STATE['stream_lock']:
-            SHARED_STATE['stream_data']['view_mode'] = data.get('mode', 'normal')
-        log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
-    elif command == 'calibrate_pixel':
-        SHARED_STATE['calibration_request'] = data.get('payload')
-        log(f"Requisição de calibração recebida: {data.get('payload')}")
-    elif command == 'save_config':
-        # Adicionar lógica para salvar a config aqui se necessário
-        log("Comando para salvar configuração recebido.")
-
-    return jsonify(success=True)
-
-@app.route('/logs')
-def get_logs_route():
-    with SHARED_STATE['stream_lock']:
-        return jsonify(logs=list(SHARED_STATE['logs']))
 
 @app.route('/stream')
 def stream_route():
@@ -103,8 +76,32 @@ def stream_route():
             ret, buffer = cv2.imencode('.jpg', output_frame)
             if ret:
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.03) # Limita a taxa de quadros para evitar sobrecarga
 
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+# --- Handlers de SocketIO ---
+@socketio.on('connect')
+def handle_connect():
+    log("Cliente conectado ao WebSocket")
+
+@socketio.on('command')
+def handle_command(data):
+    command = data.get('command')
+    payload = data.get('payload', {})
+    log(f"Comando '{command}' recebido via WebSocket com payload: {payload}")
+
+    if command == 'start_robot':
+        SHARED_STATE['start_event'].set()
+    elif command == 'set_view_mode':
+        with SHARED_STATE['stream_lock']:
+            SHARED_STATE['stream_data']['view_mode'] = payload.get('mode', 'normal')
+        log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
+    elif command == 'calibrate_pixel':
+        SHARED_STATE['calibration_request'] = payload
+        log(f"Requisição de calibração recebida: {payload}")
+    elif command == 'save_config':
+        log("Comando para salvar configuração recebido.")
+    else:
+        log(f"Comando desconhecido recebido: {command}")
 
 def run_stream():
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    socketio.run(app, host='0.0.0.0', port=5000)
