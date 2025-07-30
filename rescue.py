@@ -5,10 +5,12 @@ from vision import Vision
 
 class Rescue:
     """ Classe para a lógica de resgate de bolas. """
-    def __init__(self, hardware_control, vision, picam2):
-        self.hardware_control = hardware_control
+    def __init__(self, hardware_control, vision, picam2, log_function, update_frame_function):
+        self.hardware = hardware_control
         self.vision = vision
         self.picam2 = picam2
+        self.log = log_function
+        self.update_live_frame = update_frame_function
 
     def open_claw(self):
         """ Abre a garra. """
@@ -54,18 +56,34 @@ class Rescue:
         time.sleep(2)
 
     def scan_for_panorama(self, duration=6):
-        """ Gira o robô para escanear a sala e criar uma imagem panorâmica. """
-        print("Iniciando varredura para panorama...")
-        self.hardware_control.set_motor_speed(30, -100)  # Gira lentamente
+        """ Gira o robô para escanear a sala, detectando bolas e desenhando no frame. """
+        self.log("Iniciando varredura da sala de resgate.")
+        self.hardware.set_motor_speed(30, -100)
 
-        frames = []
+        all_detected_balls = []
+        frames_for_panorama = []
         start_time = time.time()
+
         while time.time() - start_time < duration:
-            frame = self.picam2.capture_array()
-            frames.append(frame)
-            time.sleep(0.2)
+            frame_4chan = self.picam2.capture_array()
+            frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
+            frames_for_panorama.append(frame.copy())
+
+            detected_balls = self.vision.detect_balls(frame)
+            for ball in detected_balls:
+                all_detected_balls.append(ball)
+                # Desenha no frame ao vivo para o stream
+                pos = ball['pos']
+                color = (0, 255, 255) if ball['tipo'] == 'prata' else (128, 128, 128)
+                cv2.circle(frame, pos, 15, color, 2)
+                cv2.putText(frame, ball['tipo'], (pos[0] + 10, pos[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Atualiza o stream com o frame anotado
+            self.update_live_frame(frame)
+            time.sleep(0.1)
 
         self.hardware_control.stop()
+        self.log(f"Varredura concluída. Bolas detectadas: {len(all_detected_balls)}")
         print("Varredura concluída. Tentando costurar imagens...")
 
         stitcher = cv2.Stitcher_create()

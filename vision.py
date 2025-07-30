@@ -3,8 +3,9 @@ import numpy as np
 
 class Vision:
     """ Classe para todo o processamento de visão computacional. """
-    def __init__(self, config):
+    def __init__(self, config, log_function):
         self.config = config
+        self.log = log_function
         # === Limites de cor HSV para detecção ===
         self.LOWER_GREEN = np.array([40, 50, 50])
         self.UPPER_GREEN = np.array([85, 255, 255])
@@ -76,6 +77,29 @@ class Vision:
         pixel_count = cv2.countNonZero(mask_black)
 
         return cx, silver_detected, red_detected, obstacle, intersection, centroids, curvature, mask_black, pixel_count
+
+    def calibrate_by_click(self, frame, x, y, color_name):
+        """ Calibra a faixa HSV de uma cor com base em um pixel clicado. """
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        pixel_hsv = hsv_frame[y, x]
+
+        h, s, v = int(pixel_hsv[0]), int(pixel_hsv[1]), int(pixel_hsv[2])
+
+        # Define uma tolerância para criar a faixa
+        h_tolerance = 10
+        s_tolerance = 40
+        v_tolerance = 40
+
+        lower_bound = np.array([max(0, h - h_tolerance), max(0, s - s_tolerance), max(0, v - v_tolerance)])
+        upper_bound = np.array([min(180, h + h_tolerance), min(255, s + s_tolerance), min(255, v + v_tolerance)])
+
+        # Atualiza a configuração global
+        if color_name == 'black':
+            self.config['hsv_black']['lower'] = lower_bound
+            self.config['hsv_black']['upper'] = upper_bound
+            log(f"Nova calibração para PRETO: {lower_bound} a {upper_bound}")
+
+        # Adicionar lógica para outras cores (verde, etc.) aqui se necessário
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """
