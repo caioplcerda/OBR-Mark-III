@@ -80,10 +80,8 @@ def stream_route():
                     speed_text = f"L: {speeds.get('left', 0):.1f} | R: {speeds.get('right', 0):.1f}"
                     cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # A conversão final para RGB deve acontecer aqui, antes de encodar.
-                # O browser espera um JPEG no formato RGB.
-                final_frame_rgb = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB)
-                ret, buffer = cv2.imencode('.jpg', final_frame_rgb)
+                # A conversão para JPEG é feita diretamente a partir do frame BGR.
+                ret, buffer = cv2.imencode('.jpg', output_frame)
                 if ret:
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
@@ -97,6 +95,8 @@ def stream_route():
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
             time.sleep(0.03)
+
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # --- Handlers de SocketIO ---
 @socketio.on('connect')
