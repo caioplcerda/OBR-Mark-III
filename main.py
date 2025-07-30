@@ -40,6 +40,12 @@ class Robot:
                 frame_4chan = self.picam2.capture_array()
                 frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
 
+                # Processa requisições de calibração primeiro
+                cal_req = SHARED_STATE.get('calibration_request')
+                if cal_req:
+                    self.vision.calibrate_by_click(frame, cal_req['x'], cal_req['y'], cal_req['color'])
+                    SHARED_STATE['calibration_request'] = None
+
                 path_history = []
                 status_data = {"fsm_state": self.state}
                 mask = np.zeros((480, 640), dtype=np.uint8)
@@ -82,20 +88,6 @@ class Robot:
                     self.log("Entrando no modo de resgate.")
                     self.rescue.execute_rescue()
                     self.state = "FINISHING"
-
-                elif self.state == "CALIBRATING":
-                    self.log("Modo de Calibração Ativo.")
-                    self.hardware.stop()
-
-                    # Verifica se há uma requisição de calibração
-                    cal_req = SHARED_STATE.get('calibration_request')
-                    if cal_req:
-                        self.vision.calibrate_by_click(frame, cal_req['x'], cal_req['y'], cal_req['color'])
-                        SHARED_STATE['calibration_request'] = None # Limpa a requisição
-
-                    _, _, _, _, _, _, _, mask, pixel_count = self.vision.detect_line_features(frame)
-                    status_data.update({"pixel_count": pixel_count})
-                    time.sleep(0.1)
 
                 elif self.state == "FINISHING":
                     self.log("Linha de chegada detectada. Finalizando.")

@@ -29,7 +29,7 @@ SHARED_STATE = {
     "calibration_request": None
 }
 
-# --- Funções de Controle e Logging ---
+# --- Funções de Logging ---
 def log(message):
     with SHARED_STATE["stream_lock"]:
         timestamp = time.strftime("%H:%M:%S")
@@ -42,43 +42,24 @@ def log(message):
 def index():
     return render_template_string(open('index.html').read(), config=SHARED_STATE['config'])
 
-@app.route('/start', methods=['POST'])
-def start_robot_route():
-    SHARED_STATE['start_event'].set()
-    log("Comando de início recebido pela web.")
-    return jsonify(success=True)
-
-@app.route('/calibrate', methods=['POST'])
-def calibrate_route():
+@app.route('/command', methods=['POST'])
+def command_route():
     data = request.json
-    with SHARED_STATE['stream_lock']:
-        SHARED_STATE['config']['pid']['kp'] = float(data['kp'])
-        SHARED_STATE['config']['pid']['ki'] = float(data['ki'])
-        SHARED_STATE['config']['pid']['kd'] = float(data['kd'])
-        SHARED_STATE['config']['hsv_black']['lower'] = np.array([int(data['h_min_black']), int(data['s_min_black']), int(data['v_min_black'])])
-        SHARED_STATE['config']['hsv_black']['upper'] = np.array([int(data['h_max_black']), int(data['s_max_black']), int(data['v_max_black'])])
-    log("Configuração PID/HSV atualizada.")
-    return jsonify(success=True)
+    command = data.get('command')
 
-@app.route('/set_view_mode', methods=['POST'])
-def set_view_mode_route():
-    with SHARED_STATE['stream_lock']:
-        SHARED_STATE['stream_data']['view_mode'] = request.json.get('mode', 'normal')
-    log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
-    return jsonify(success=True)
-
-@app.route('/calibrate_pixel', methods=['POST'])
-def calibrate_pixel_route():
-    data = request.json
-    x, y, color_name = data['x'], data['y'], data['color']
-
-    # Acessa o último frame e chama a função de calibração
-    with SHARED_STATE['stream_lock']:
-        frame = SHARED_STATE['stream_data']['last_frame']
-
-    # A chamada à visão precisa ser feita na thread principal
-    # Vamos usar um evento para sinalizar a calibração
-    SHARED_STATE['calibration_request'] = {'x': x, 'y': y, 'color': color_name}
+    if command == 'start_robot':
+        SHARED_STATE['start_event'].set()
+        log("Comando 'start_robot' recebido.")
+    elif command == 'set_view_mode':
+        with SHARED_STATE['stream_lock']:
+            SHARED_STATE['stream_data']['view_mode'] = data.get('mode', 'normal')
+        log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
+    elif command == 'calibrate_pixel':
+        SHARED_STATE['calibration_request'] = data.get('payload')
+        log(f"Requisição de calibração recebida: {data.get('payload')}")
+    elif command == 'save_config':
+        # Adicionar lógica para salvar a config aqui se necessário
+        log("Comando para salvar configuração recebido.")
 
     return jsonify(success=True)
 
