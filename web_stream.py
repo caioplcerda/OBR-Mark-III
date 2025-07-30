@@ -45,38 +45,58 @@ def index():
 def stream_route():
     def generate():
         while True:
-            with SHARED_STATE['stream_lock']:
-                s_data = SHARED_STATE['stream_data']
-                frame = s_data['last_frame'].copy()
-                mask = s_data['last_mask'].copy()
-                view_mode = s_data['view_mode']
-                path = list(s_data['path_history'])
-                status = dict(s_data['status_data'])
-                speeds = dict(s_data['motor_speeds'])
+            try:
+                with SHARED_STATE['stream_lock']:
+                    s_data = SHARED_STATE['stream_data']
+                    frame = s_data['last_frame'].copy()
+                    mask = s_data['last_mask'].copy()
+                    view_mode = s_data['view_mode']
+                    path = list(s_data['path_history'])
+                    status = dict(s_data['status_data'])
+                    speeds = dict(s_data['motor_speeds'])
 
-            if view_mode == 'mask':
-                output_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            else:
-                output_frame = frame
-                if view_mode == 'contours':
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cv2.drawContours(output_frame, contours, -1, (0, 255, 0), 2)
+                if frame is None or frame.size == 0:
+                    time.sleep(0.1)
+                    continue
 
-                for i in range(1, len(path)):
-                    cv2.line(output_frame, path[i-1], path[i], (255,0,0), 2)
+                if view_mode == 'mask':
+                    output_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+                else:
+                    output_frame = frame
+                    if view_mode == 'contours' and mask is not None and mask.size > 0:
+                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        cv2.drawContours(output_frame, contours, -1, (0, 255, 0), 2)
 
-                y_pos = 30
-                for key, value in status.items():
-                    cv2.putText(output_frame, f"{key}: {value}", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    y_pos += 20
+                    if path:
+                        for i in range(1, len(path)):
+                            if path[i-1] and path[i]:
+                                cv2.line(output_frame, path[i-1], path[i], (255,0,0), 2)
 
-                speed_text = f"L: {speeds.get('left', 0):.1f} | R: {speeds.get('right', 0):.1f}"
-                cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    y_pos = 30
+                    for key, value in status.items():
+                        cv2.putText(output_frame, f"{key}: {value}", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                        y_pos += 20
 
-            ret, buffer = cv2.imencode('.jpg', output_frame)
-            if ret:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-            time.sleep(0.03) # Limita a taxa de quadros para evitar sobrecarga
+                    speed_text = f"L: {speeds.get('left', 0):.1f} | R: {speeds.get('right', 0):.1f}"
+                    cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # A conversão final para RGB deve acontecer aqui, antes de encodar.
+                # O browser espera um JPEG no formato RGB.
+                final_frame_rgb = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB)
+                ret, buffer = cv2.imencode('.jpg', final_frame_rgb)
+                if ret:
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+            except Exception as e:
+                log(f"Erro no stream de vídeo: {e}")
+                # Em caso de erro, gera um frame de erro para não quebrar o stream
+                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(error_frame, "Erro no Stream", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                ret, buffer = cv2.imencode('.jpg', error_frame)
+                if ret:
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+            time.sleep(0.03)
 
 # --- Handlers de SocketIO ---
 @socketio.on('connect')
