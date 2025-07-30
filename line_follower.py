@@ -15,7 +15,8 @@ class LineFollower:
 
     def follow_line(self, frame, curvature):
         """ Executa a lógica de seguimento de linha para um único frame. """
-        cx, _, _, _, _, _, centroids = self.vision.detect_line_features(frame)
+        # A chamada agora desempacota 9 valores, ignorando os que não são usados aqui.
+        cx, _, _, _, _, centroids, _, _, _ = self.vision.detect_line_features(frame)
         status = ""
 
         if cx != -1:
