@@ -32,6 +32,7 @@
                     <button id="view-normal">Visão Normal</button>
                     <button id="view-mask">Máscara</button>
                     <button id="view-contours">Contornos</button>
+                    <button id="view-derivative">Derivadas</button>
                 </div>
             </div>
             <div class="controls-section">
@@ -80,6 +81,7 @@
         const viewNormal = document.getElementById('view-normal');
         const viewMask = document.getElementById('view-mask');
         const viewContours = document.getElementById('view-contours');
+        const viewDerivative = document.getElementById('view-derivative');
         const logConsole = document.getElementById('log-console');
         const colorToCalibrate = document.getElementById('color-to-calibrate');
 
@@ -97,6 +99,9 @@
         }
         if (viewContours) {
             viewContours.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'contours' }));
+        }
+        if (viewDerivative) {
+            viewDerivative.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'derivative' }));
         }
 
         // Listener para calibração por clique no vídeo
