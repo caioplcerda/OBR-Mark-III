@@ -38,7 +38,7 @@ class Robot:
         try:
             while True:
                 frame_4chan = self.picam2.capture_array()
-                frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
+                frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2RGB)
 
                 # Processa requisições de calibração primeiro
                 cal_req = SHARED_STATE.get('calibration_request')

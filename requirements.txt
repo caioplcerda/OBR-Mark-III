@@ -3,3 +3,4 @@ numpy
 RPi.GPIO
 picamera2
 flask
+Flask-SocketIO

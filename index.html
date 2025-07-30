@@ -3,50 +3,119 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Calibração do Robô</title>
-    <style>/* ... estilos ... */</style>
+    <title>Controle e Calibração do Robô</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; }
+        .main-layout { display: flex; gap: 20px; flex-wrap: wrap; }
+        .stream-section { flex: 2; min-width: 640px; }
+        .controls-section { flex: 1; min-width: 300px; }
+        #video-stream { width: 100%; height: auto; border: 1px solid #ccc; background-color: #000; }
+        .button-group { margin-bottom: 20px; }
+        button { padding: 10px 15px; border: none; border-radius: 5px; background-color: #007bff; color: white; cursor: pointer; margin-right: 10px; }
+        button:hover { background-color: #0056b3; }
+        #log-console { height: 300px; background: #222; color: #0f0; padding: 10px; overflow-y: scroll; border-radius: 5px; font-family: 'Courier New', Courier, monospace; }
+        .control-item { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        select, input { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
+    </style>
 </head>
 <body>
-    <!-- ... (estrutura HTML) ... -->
+    <div class="container">
+        <h1>Painel de Controle do Robô</h1>
+        <div class="main-layout">
+            <div class="stream-section">
+                <h2>Video Stream</h2>
+                <img id="video-stream" src="/stream" width="640" height="480" alt="Video Stream">
+                <div class="button-group">
+                    <button id="view-normal">Visão Normal</button>
+                    <button id="view-mask">Máscara</button>
+                    <button id="view-contours">Contornos</button>
+                </div>
+            </div>
+            <div class="controls-section">
+                <h2>Controles</h2>
+                <div class="button-group">
+                    <button id="start-button">Iniciar Robô</button>
+                    <button id="save-config-button">Salvar Config</button>
+                </div>
+
+                <div class="control-item">
+                    <label for="color-to-calibrate">Calibrar Cor (clique no vídeo):</label>
+                    <select id="color-to-calibrate">
+                        <option value="black">Preto (Linha)</option>
+                        <option value="green">Verde (Área)</option>
+                    </select>
+                </div>
+
+                <h2>Console de Logs</h2>
+                <div id="log-console"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
     <script>
-    document.addEventListener('DOMContentLoaded', (event) => {
+    document.addEventListener('DOMContentLoaded', () => {
+        // Conecta ao servidor WebSocket
+        const socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 
-        function sendCommand(command, payload = {}) {
-            console.log(`Enviando comando: ${command}`, payload);
-            fetch('/command', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: command, ...payload })
-            }).catch(error => console.error(`Erro no comando ${command}:`, error));
-        }
-
-        document.getElementById('start-button').addEventListener('click', () => sendCommand('start_robot'));
-
-        document.getElementById('video-stream').addEventListener('click', function(e) {
-            const rect = videoStream.getBoundingClientRect();
-            const x = Math.round(e.clientX - rect.left);
-            const y = Math.round(e.clientY - rect.top);
-            const color = document.getElementById('color-to-calibrate').value;
-            sendCommand('calibrate_pixel', { payload: { x, y, color } });
+        socket.on('connect', () => {
+            console.log('Conectado ao servidor WebSocket!');
         });
 
-        document.getElementById('view-normal').addEventListener('click', () => sendCommand('set_view_mode', { mode: 'normal' }));
-        document.getElementById('view-mask').addEventListener('click', () => sendCommand('set_view_mode', { mode: 'mask' }));
-        document.getElementById('view-contours').addEventListener('click', () => sendCommand('set_view_mode', { mode: 'contours' }));
-
-        function fetchLogs() {
-            fetch('/logs')
-                .then(response => response.json())
-                .then(data => {
-                    const logConsole = document.getElementById('log-console');
-                    const newContent = data.logs.join('<br>');
-                    if (logConsole.innerHTML !== newContent) {
-                        logConsole.innerHTML = newContent;
-                        logConsole.scrollTop = logConsole.scrollHeight;
-                    }
-                });
+        // Função unificada para enviar comandos via WebSocket
+        function sendCommand(command, payload = {}) {
+            console.log(`Enviando comando: ${command}`, payload);
+            socket.emit('command', { command, payload });
         }
-        setInterval(fetchLogs, 1500);
+
+        // Listeners para os botões
+        const startButton = document.getElementById('start-button');
+        const saveConfigButton = document.getElementById('save-config-button');
+        const videoStream = document.getElementById('video-stream');
+        const viewNormal = document.getElementById('view-normal');
+        const viewMask = document.getElementById('view-mask');
+        const viewContours = document.getElementById('view-contours');
+        const logConsole = document.getElementById('log-console');
+        const colorToCalibrate = document.getElementById('color-to-calibrate');
+
+        if (startButton) {
+            startButton.addEventListener('click', () => sendCommand('start_robot'));
+        }
+        if (saveConfigButton) {
+            saveConfigButton.addEventListener('click', () => sendCommand('save_config'));
+        }
+        if (viewNormal) {
+            viewNormal.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'normal' }));
+        }
+        if (viewMask) {
+            viewMask.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'mask' }));
+        }
+        if (viewContours) {
+            viewContours.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'contours' }));
+        }
+
+        // Listener para calibração por clique no vídeo
+        if (videoStream) {
+            videoStream.addEventListener('click', function(e) {
+                const rect = videoStream.getBoundingClientRect();
+                const x = Math.round(e.clientX - rect.left);
+                const y = Math.round(e.clientY - rect.top);
+                const color = colorToCalibrate.value;
+                sendCommand('calibrate_pixel', { x, y, color });
+            });
+        }
+
+        // Listener para receber logs do servidor
+        socket.on('log_message', (msg) => {
+            if (logConsole && msg.data) {
+                logConsole.innerHTML += msg.data + '<br>';
+                logConsole.scrollTop = logConsole.scrollHeight; // Auto-scroll
+            }
+        });
+
     });
     </script>
 </body>
