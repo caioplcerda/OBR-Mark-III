@@ -10,10 +10,6 @@ class Vision:
         self.LOWER_GREEN = np.array([40, 50, 50])
         self.UPPER_GREEN = np.array([85, 255, 255])
 
-        # Limites para a cor Prata/Cinza
-        self.LOWER_SILVER = np.array([0, 0, 100])
-        self.UPPER_SILVER = np.array([180, 30, 220])
-
         # Limites para a cor Vermelha (duas faixas no HSV)
         self.LOWER_RED1 = np.array([0, 70, 50])
         self.UPPER_RED1 = np.array([10, 255, 255])
@@ -58,7 +54,9 @@ class Vision:
         intersection = all(c != -1 for c in centroids.values())
 
         # Detecção de cores em área ampla
-        mask_silver = cv2.inRange(hsv, self.LOWER_SILVER, self.UPPER_SILVER)
+        lower_silver = self.config['hsv_silver']['lower']
+        upper_silver = self.config['hsv_silver']['upper']
+        mask_silver = cv2.inRange(hsv, lower_silver, upper_silver)
         mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
         mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
         mask_red = cv2.add(mask_red1, mask_red2)
@@ -98,8 +96,14 @@ class Vision:
             self.config['hsv_black']['lower'] = lower_bound
             self.config['hsv_black']['upper'] = upper_bound
             self.log(f"Nova calibração para PRETO: {lower_bound} a {upper_bound}")
-
-        # Adicionar lógica para outras cores (verde, etc.) aqui se necessário
+        elif color_name == 'white':
+            self.config['hsv_white']['lower'] = lower_bound
+            self.config['hsv_white']['upper'] = upper_bound
+            self.log(f"Nova calibração para BRANCO: {lower_bound} a {upper_bound}")
+        elif color_name == 'silver':
+            self.config['hsv_silver']['lower'] = lower_bound
+            self.config['hsv_silver']['upper'] = upper_bound
+            self.log(f"Nova calibração para PRATA: {lower_bound} a {upper_bound}")
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """
@@ -113,8 +117,14 @@ class Vision:
     def detect_balls(self, frame):
         """ Detecta as bolas de resgate (prateadas e pretas). """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask_silver = cv2.inRange(hsv, self.LOWER_SILVER, self.UPPER_SILVER)
-        mask_black = cv2.inRange(hsv, self.LOWER_BLACK, self.UPPER_BLACK)
+
+        lower_silver = self.config['hsv_silver']['lower']
+        upper_silver = self.config['hsv_silver']['upper']
+        mask_silver = cv2.inRange(hsv, lower_silver, upper_silver)
+
+        lower_black = self.config['hsv_black']['lower']
+        upper_black = self.config['hsv_black']['upper']
+        mask_black = cv2.inRange(hsv, lower_black, upper_black)
 
         balls = []
 
