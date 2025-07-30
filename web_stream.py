@@ -25,7 +25,8 @@ SHARED_STATE = {
         "motor_speeds": {"left": 0, "right": 0},
         "status_data": {},
         "view_mode": 'normal'
-    }
+    },
+    "calibration_request": None
 }
 
 # --- Funções de Controle e Logging ---
@@ -66,6 +67,21 @@ def set_view_mode_route():
     log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
     return jsonify(success=True)
 
+@app.route('/calibrate_pixel', methods=['POST'])
+def calibrate_pixel_route():
+    data = request.json
+    x, y, color_name = data['x'], data['y'], data['color']
+
+    # Acessa o último frame e chama a função de calibração
+    with SHARED_STATE['stream_lock']:
+        frame = SHARED_STATE['stream_data']['last_frame']
+
+    # A chamada à visão precisa ser feita na thread principal
+    # Vamos usar um evento para sinalizar a calibração
+    SHARED_STATE['calibration_request'] = {'x': x, 'y': y, 'color': color_name}
+
+    return jsonify(success=True)
+
 @app.route('/logs')
 def get_logs_route():
     with SHARED_STATE['stream_lock']:
@@ -103,8 +119,7 @@ def stream_route():
                 speed_text = f"L: {speeds.get('left', 0):.1f} | R: {speeds.get('right', 0):.1f}"
                 cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            rotated = cv2.rotate(output_frame, cv2.ROTATE_90_CLOCKWISE)
-            ret, buffer = cv2.imencode('.jpg', rotated)
+            ret, buffer = cv2.imencode('.jpg', output_frame)
             if ret:
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
