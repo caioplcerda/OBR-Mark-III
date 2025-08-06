@@ -53,6 +53,11 @@ class Vision:
         # Uma interseção é detectada se a linha estiver presente em todos os ROIs
         intersection = all(c != -1 for c in centroids.values())
 
+        # Um gap ocorre quando o ROI inferior não encontra a linha
+        # mas algum dos ROIs superiores ainda a detecta
+        gap_detected = (centroids["bottom"] == -1 and \
+                        (centroids["middle"] != -1 or centroids["top"] != -1))
+
         # Detecção de cores em área ampla
         lower_silver = self.config['hsv_silver']['lower']
         upper_silver = self.config['hsv_silver']['upper']
@@ -66,15 +71,40 @@ class Vision:
 
         obstacle = self.detect_obstacle(mask_black)
 
-        # Calcula a curvatura
+        # Calcula a curvatura usando regressão polinomial de 2º grau
         curvature = 0
-        if centroids['top'] != -1 and centroids['bottom'] != -1:
-            curvature = centroids['top'] - centroids['bottom']
+        # Coordenadas Y aproximadas do centro de cada ROI
+        roi_y = {"bottom": 230, "middle": 190, "top": 150}
+        valid_points = [(roi_y[name], x) for name, x in centroids.items() if x != -1]
+        if len(valid_points) >= 3:
+            ys, xs = zip(*valid_points)
+            coeffs = np.polyfit(ys, xs, 2)
+            a, b, _ = coeffs
+            y_eval = ys[0]  # avalia a curvatura próximo ao robô
+            dxdy = 2 * a * y_eval + b
+            ddxdy = 2 * a
+            if abs(ddxdy) > 1e-6:
+                radius = ((1 + dxdy**2) ** 1.5) / abs(ddxdy)
+                curvature = 1 / (radius + 1)  # Normaliza para 0-1
+        elif len(valid_points) >= 2:
+            # Com poucos pontos, assume-se curva suave
+            curvature = 0
 
         # Contagem de pixels na máscara preta
         pixel_count = cv2.countNonZero(mask_black)
 
-        return cx, silver_detected, red_detected, obstacle, intersection, centroids, curvature, mask_black, pixel_count
+        return (
+            cx,
+            silver_detected,
+            red_detected,
+            obstacle,
+            intersection,
+            gap_detected,
+            centroids,
+            curvature,
+            mask_black,
+            pixel_count,
+        )
 
     def calibrate_by_click(self, frame, x, y, color_name):
         """ Calibra a faixa HSV de uma cor com base em um pixel clicado. """
