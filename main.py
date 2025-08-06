@@ -129,7 +129,7 @@ class Robot:
                             status_data.update({"error": "Line Lost"})
 
                         # Basic detection for intersections, etc. (can be improved)
-                        _, silver, red, obstacle, intersection, _, _, _, _ = self.vision.detect_line_features(frame)
+                        _, silver, red, obstacle, intersection, _, _, _, _, _ = self.vision.detect_line_features(frame)
                         if red: self.state = "FINISHING"
                         elif silver: self.state = "RESCUE"
 
