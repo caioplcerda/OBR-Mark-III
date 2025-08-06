@@ -8,7 +8,6 @@ from collections import deque
 from hardware_control import HardwareControl
 from vision import Vision
 import advanced_vision as adv_vision
-from rescue import Rescue
 from web_stream import SHARED_STATE, log, run_stream
 
 class Robot:
@@ -21,7 +20,6 @@ class Robot:
 
         self.hardware = HardwareControl(SHARED_STATE['config'])
         self.vision = Vision(SHARED_STATE['config'], self.log)
-        self.rescue = Rescue(self.hardware, self.vision, self.picam2, self.log, self.update_stream_data)
 
         self.state = "WAITING"
         # State for advanced line follower
@@ -129,9 +127,9 @@ class Robot:
                             status_data.update({"error": "Line Lost"})
 
                         # Basic detection for intersections, etc. (can be improved)
-                        _, silver, red, obstacle, intersection, _, _, _, _, _ = self.vision.detect_line_features(frame)
-                        if red: self.state = "FINISHING"
-                        elif silver: self.state = "RESCUE"
+                        _, _, red, obstacle, intersection, _, _, _, _, _ = self.vision.detect_line_features(frame)
+                        if red:
+                            self.state = "FINISHING"
 
                     elif self.state == "INTERSECTION":
                         self.log("Interseção detectada. Parando e seguindo em frente.")
@@ -147,11 +145,6 @@ class Robot:
                         self.hardware.set_motor_speed(50, 0)
                         time.sleep(1)
                         self.state = "FOLLOWING_LINE"
-
-                    elif self.state == "RESCUE":
-                        self.log("Entrando no modo de resgate.")
-                        self.rescue.execute_rescue()
-                        self.state = "FINISHING"
 
                     elif self.state == "FINISHING":
                         self.log("Linha de chegada detectada. Finalizando.")
