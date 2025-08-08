@@ -15,8 +15,7 @@ SHARED_STATE = {
     "config": {
         "pid": {"kp": 0.4, "ki": 0.0, "kd": 0.1},
         "hsv_black": { "lower": np.array([0, 0, 0]), "upper": np.array([180, 255, 50]) },
-        "hsv_white": { "lower": np.array([0, 0, 180]), "upper": np.array([180, 25, 255]) },
-        "hsv_silver": { "lower": np.array([0, 0, 100]), "upper": np.array([180, 30, 220]) }
+        "hsv_white": { "lower": np.array([0, 0, 180]), "upper": np.array([180, 25, 255]) }
     },
     "start_event": threading.Event(),
     "stream_lock": threading.Lock(),
