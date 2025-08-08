@@ -58,15 +58,10 @@ class Vision:
         gap_detected = (centroids["bottom"] == -1 and \
                         (centroids["middle"] != -1 or centroids["top"] != -1))
 
-        # Detecção de cores em área ampla
-        lower_silver = self.config['hsv_silver']['lower']
-        upper_silver = self.config['hsv_silver']['upper']
-        mask_silver = cv2.inRange(hsv, lower_silver, upper_silver)
+        # Detecção da linha de chegada (vermelho)
         mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
         mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
         mask_red = cv2.add(mask_red1, mask_red2)
-
-        silver_detected = cv2.countNonZero(mask_silver) > self.GREEN_THRESHOLD_AREA # Reutilizando o threshold
         red_detected = cv2.countNonZero(mask_red) > self.GREEN_THRESHOLD_AREA
 
         obstacle = self.detect_obstacle(mask_black)
@@ -95,7 +90,6 @@ class Vision:
 
         return (
             cx,
-            silver_detected,
             red_detected,
             obstacle,
             intersection,
@@ -130,10 +124,6 @@ class Vision:
             self.config['hsv_white']['lower'] = lower_bound
             self.config['hsv_white']['upper'] = upper_bound
             self.log(f"Nova calibração para BRANCO: {lower_bound} a {upper_bound}")
-        elif color_name == 'silver':
-            self.config['hsv_silver']['lower'] = lower_bound
-            self.config['hsv_silver']['upper'] = upper_bound
-            self.log(f"Nova calibração para PRATA: {lower_bound} a {upper_bound}")
 
     def detect_obstacle(self, mask_black):
         """ Detecta obstáculos na pista. """
@@ -143,31 +133,3 @@ class Vision:
             if cv2.contourArea(cnt) > self.OBSTACLE_MIN_AREA:
                 return True
         return False
-
-    def detect_balls(self, frame):
-        """ Detecta as bolas de resgate (prateadas e pretas). """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-        lower_silver = self.config['hsv_silver']['lower']
-        upper_silver = self.config['hsv_silver']['upper']
-        mask_silver = cv2.inRange(hsv, lower_silver, upper_silver)
-
-        lower_black = self.config['hsv_black']['lower']
-        upper_black = self.config['hsv_black']['upper']
-        mask_black = cv2.inRange(hsv, lower_black, upper_black)
-
-        balls = []
-
-        contours_silver, _ = cv2.findContours(mask_silver, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for c in contours_silver:
-            if cv2.contourArea(c) > 200:
-                x, y, w, h = cv2.boundingRect(c)
-                balls.append({"tipo": "prata", "pos": (x + w // 2, y + h // 2)})
-
-        contours_black, _ = cv2.findContours(mask_black, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for c in contours_black:
-            if cv2.contourArea(c) > 200:
-                x, y, w, h = cv2.boundingRect(c)
-                balls.append({"tipo": "preta", "pos": (x + w // 2, y + h // 2)})
-
-        return balls
