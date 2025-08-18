@@ -8,7 +8,6 @@ from collections import deque
 from hardware_control import HardwareControl
 from vision import Vision
 import advanced_vision as adv_vision
-from rescue import Rescue
 from web_stream import SHARED_STATE, log, run_stream
 
 class Robot:
@@ -21,12 +20,12 @@ class Robot:
 
         self.hardware = HardwareControl(SHARED_STATE['config'])
         self.vision = Vision(SHARED_STATE['config'], self.log)
-        self.rescue = Rescue(self.hardware, self.vision, self.picam2, self.log, self.update_stream_data)
 
         self.state = "WAITING"
         # State for advanced line follower
         self.line_points = deque(maxlen=20)
         self.last_line_angle = -90.0  # Start by looking straight up (-90 deg)
+        self.planned_direction = None
 
     def update_stream_data(self, frame, mask=None, path_history=None, speeds=None, status_data=None, derivative_scan=None):
         with SHARED_STATE['stream_lock']:
@@ -128,10 +127,27 @@ class Robot:
                             self.hardware.stop()
                             status_data.update({"error": "Line Lost"})
 
-                        # Basic detection for intersections, etc. (can be improved)
-                        _, silver, red, obstacle, intersection, _, _, _, _, _ = self.vision.detect_line_features(frame)
-                        if red: self.state = "FINISHING"
-                        elif silver: self.state = "RESCUE"
+                        # Basic detection for intersections, cores e obstáculos
+                        _, red, obstacle, intersection, _, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
+
+                        # Desenha marcadores verdes detectados
+                        for gx, gy in green_points:
+                            cv2.circle(frame, (gx, gy), 10, (0, 255, 0), 2)
+
+                        if intersection and green_dir:
+                            self.planned_direction = green_dir
+                            if green_dir == "left":
+                                self.last_line_angle = -135
+                            elif green_dir == "right":
+                                self.last_line_angle = -45
+                            else:
+                                self.last_line_angle = -90
+
+                        if red:
+                            self.state = "FINISHING"
+
+                        mask = mask_black
+                        status_data.update({"green": green_dir, "planned_path": self.planned_direction})
 
                     elif self.state == "INTERSECTION":
                         self.log("Interseção detectada. Parando e seguindo em frente.")
@@ -147,11 +163,6 @@ class Robot:
                         self.hardware.set_motor_speed(50, 0)
                         time.sleep(1)
                         self.state = "FOLLOWING_LINE"
-
-                    elif self.state == "RESCUE":
-                        self.log("Entrando no modo de resgate.")
-                        self.rescue.execute_rescue()
-                        self.state = "FINISHING"
 
                     elif self.state == "FINISHING":
                         self.log("Linha de chegada detectada. Finalizando.")
