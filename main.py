@@ -90,24 +90,46 @@ class Robot:
                             derivative_data = deriv0 # Save first derivative for visualization
 
                             # 2. Subsequent scans (scancircle) to predict the path
-                            num_scans = 4
                             scan_radius = 30
                             look_width = 180
                             current_look_angle = self.last_line_angle
+                            max_scans = 50
+                            scan_count = 0
 
-                            for i in range(num_scans):
-                                if not last_scan_center: break
-
-                                scandata, angles = adv_vision.scancircle(frame_gray, last_scan_center, scan_radius, current_look_angle, look_width)
-                                scan_details = {'center_point': last_scan_center, 'radius': scan_radius}
-                                p_next, deriv_next = adv_vision.find_line_from_scan(scandata, angles, 'circle', scan_details)
+                            while last_scan_center and scan_count < max_scans:
+                                scandata, angles = adv_vision.scancircle(
+                                    frame_gray,
+                                    last_scan_center,
+                                    scan_radius,
+                                    current_look_angle,
+                                    look_width,
+                                )
+                                scan_details = {
+                                    'center_point': last_scan_center,
+                                    'radius': scan_radius,
+                                }
+                                p_next, deriv_next = adv_vision.find_line_from_scan(
+                                    scandata,
+                                    angles,
+                                    'circle',
+                                    scan_details,
+                                )
 
                                 if p_next:
                                     current_look_angle = adv_vision.line_angle_from_points(last_scan_center, p_next)
                                     scan_points.append(p_next)
                                     last_scan_center = p_next
+                                    # Stop if the line leaves the frame
+                                    if (
+                                        p_next[1] <= 5
+                                        or p_next[0] <= 5
+                                        or p_next[0] >= frame.shape[1] - 5
+                                    ):
+                                        break
                                 else:
                                     break
+
+                                scan_count += 1
 
                         # 3. Update state and calculate motor error
                         if len(scan_points) > 1:

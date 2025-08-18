@@ -25,7 +25,7 @@ O software é modular e foi desenvolvido em Python, dividido nos seguintes compo
 ### Interface Web
 - **Stream de Vídeo ao Vivo:** Transmite a visão do robô em tempo real para um navegador web.
 - **Calibração Remota:** Permite ajustar os principais parâmetros do robô (PID, limites de cor HSV, velocidades) através da interface web, sem a necessidade de alterar o código diretamente.
-- **Sinalização de rota:** O stream destaca marcadores verdes detectados e exibe o caminho planejado.
+- **Sinalização de rota:** O stream destaca marcadores verdes detectados e exibe o caminho planejado até onde a linha deixa de ser visível.
 
 ## Configuração e Uso
 
