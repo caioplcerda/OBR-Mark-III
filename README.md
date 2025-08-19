@@ -18,11 +18,14 @@ O software é modular e foi desenvolvido em Python, dividido nos seguintes compo
 - **Controle PID com Encoders:** Controle preciso de velocidade e distância utilizando um controlador PID que leva em conta a leitura de encoders ópticos em cada roda.
 - **Visão Lateral e Look-Ahead:** A câmera é montada de lado (90 graus), permitindo uma visão mais ampla e distante da pista. O software corrige a rotação da imagem e usa uma projeção look-ahead para antecipar curvas.
 - **Detecção de Desafios:** Lógica para identificar e transpor desafios como interseções, gaps e obstáculos.
+- **Suporte a linhas grossas:** A visão computacional reconhece pistas com até 20 mm de largura usando operações morfológicas e contornos.
+- **Marcadores verdes em interseções:** detecção de áreas verdes para orientar o robô sobre qual caminho seguir, realizando um retorno de 180° quando dois marcadores aparecem simultaneamente.
 
 
 ### Interface Web
 - **Stream de Vídeo ao Vivo:** Transmite a visão do robô em tempo real para um navegador web.
 - **Calibração Remota:** Permite ajustar os principais parâmetros do robô (PID, limites de cor HSV, velocidades) através da interface web, sem a necessidade de alterar o código diretamente.
+- **Sinalização de rota:** O stream destaca marcadores verdes detectados e exibe o caminho planejado até onde a linha deixa de ser visível.
 
 ## Configuração e Uso
 

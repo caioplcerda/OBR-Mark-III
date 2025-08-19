@@ -25,6 +25,7 @@ class Robot:
         # State for advanced line follower
         self.line_points = deque(maxlen=20)
         self.last_line_angle = -90.0  # Start by looking straight up (-90 deg)
+        self.planned_direction = None
 
     def update_stream_data(self, frame, mask=None, path_history=None, speeds=None, status_data=None, derivative_scan=None):
         with SHARED_STATE['stream_lock']:
@@ -89,24 +90,46 @@ class Robot:
                             derivative_data = deriv0 # Save first derivative for visualization
 
                             # 2. Subsequent scans (scancircle) to predict the path
-                            num_scans = 4
                             scan_radius = 30
                             look_width = 180
                             current_look_angle = self.last_line_angle
+                            max_scans = 50
+                            scan_count = 0
 
-                            for i in range(num_scans):
-                                if not last_scan_center: break
-
-                                scandata, angles = adv_vision.scancircle(frame_gray, last_scan_center, scan_radius, current_look_angle, look_width)
-                                scan_details = {'center_point': last_scan_center, 'radius': scan_radius}
-                                p_next, deriv_next = adv_vision.find_line_from_scan(scandata, angles, 'circle', scan_details)
+                            while last_scan_center and scan_count < max_scans:
+                                scandata, angles = adv_vision.scancircle(
+                                    frame_gray,
+                                    last_scan_center,
+                                    scan_radius,
+                                    current_look_angle,
+                                    look_width,
+                                )
+                                scan_details = {
+                                    'center_point': last_scan_center,
+                                    'radius': scan_radius,
+                                }
+                                p_next, deriv_next = adv_vision.find_line_from_scan(
+                                    scandata,
+                                    angles,
+                                    'circle',
+                                    scan_details,
+                                )
 
                                 if p_next:
                                     current_look_angle = adv_vision.line_angle_from_points(last_scan_center, p_next)
                                     scan_points.append(p_next)
                                     last_scan_center = p_next
+                                    # Stop if the line leaves the frame
+                                    if (
+                                        p_next[1] <= 5
+                                        or p_next[0] <= 5
+                                        or p_next[0] >= frame.shape[1] - 5
+                                    ):
+                                        break
                                 else:
                                     break
+
+                                scan_count += 1
 
                         # 3. Update state and calculate motor error
                         if len(scan_points) > 1:
@@ -125,25 +148,42 @@ class Robot:
                         else:
                             self.hardware.stop()
                             status_data.update({"error": "Line Lost"})
+                        # Basic detection for interseções e marcadores verdes
+                        _, red, _, intersection, _, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
 
-                        # Basic detection for intersections, etc. (can be improved)
-                        _, red, obstacle, intersection, _, _, _, _, _ = self.vision.detect_line_features(frame)
+                        # Desenha marcadores verdes detectados
+                        for gx, gy in green_points:
+                            cv2.circle(frame, (gx, gy), 10, (0, 255, 0), 2)
+
+                        if intersection and green_dir:
+                            if green_dir == "uturn":
+                                self.planned_direction = green_dir
+                                self.state = "TURNING_AROUND"
+                            else:
+                                self.planned_direction = green_dir
+                                if green_dir == "left":
+                                    self.last_line_angle = -135
+                                elif green_dir == "right":
+                                    self.last_line_angle = -45
+                                else:
+                                    self.last_line_angle = -90
+
                         if red:
                             self.state = "FINISHING"
 
-                    elif self.state == "INTERSECTION":
-                        self.log("Interseção detectada. Parando e seguindo em frente.")
-                        self.hardware.stop()
-                        time.sleep(1)
-                        self.hardware.set_motor_speed(50, 0)
-                        self.state = "FOLLOWING_LINE"
+                        mask = mask_black
+                        status_data.update({"green": green_dir, "planned_path": self.planned_direction})
 
-                    elif self.state == "AVOIDING_OBSTACLE":
-                        self.log("Obstáculo detectado. Desviando.")
-                        self.hardware.set_motor_speed(40, 100)
-                        time.sleep(0.5)
-                        self.hardware.set_motor_speed(50, 0)
+                    # Estados adicionais (interseção e obstáculos) removidos nesta versão focada no seguidor de linha
+
+                    elif self.state == "TURNING_AROUND":
+                        self.log("Dois marcadores verdes detectados. Executando retorno de 180°.")
+                        # Gira no lugar aplicando velocidades opostas por um curto período
+                        self.hardware.set_motor_speed(0, 100)
                         time.sleep(1)
+                        self.hardware.stop()
+                        # Após virar, o robô olhará para trás (90°)
+                        self.last_line_angle = 90
                         self.state = "FOLLOWING_LINE"
 
                     elif self.state == "FINISHING":

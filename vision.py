@@ -22,6 +22,7 @@ class Vision:
         self.GREEN_THRESHOLD_AREA = 5000
         self.OBSTACLE_MIN_AREA = 2000
         self.OBSTACLE_REGION_Y = 100
+        self.INTERSECTION_WIDTH_THRESHOLD = int(self.FRAME_WIDTH * 0.8)
 
     def detect_line_features(self, frame):
         """ Detecta características da linha, como centroide, interseções e obstáculos. """
@@ -30,28 +31,43 @@ class Vision:
         lower_black = self.config['hsv_black']['lower']
         upper_black = self.config['hsv_black']['upper']
         mask_black = cv2.inRange(hsv, lower_black, upper_black)
+        kernel = np.ones((5, 5), np.uint8)
+        mask_black = cv2.morphologyEx(mask_black, cv2.MORPH_CLOSE, kernel)
 
         mask_green = cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
 
         # Múltiplos ROIs (Regiões de Interesse) para uma análise mais robusta da linha
         rois = {
-            "bottom": mask_black[220:240, :],
-            "middle": mask_black[180:200, :],
-            "top": mask_black[140:160, :]
+            "bottom": mask_black[210:240, :],
+            "middle": mask_black[160:200, :],
+            "top": mask_black[110:150, :]
         }
 
         centroids = {}
+        widths = {}
         for name, roi in rois.items():
-            M = cv2.moments(roi)
-            if M["m00"] != 0:
-                centroids[name] = int(M["m10"] / M["m00"])
+            contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                largest = max(contours, key=cv2.contourArea)
+                M = cv2.moments(largest)
+                if M["m00"] != 0:
+                    centroids[name] = int(M["m10"] / M["m00"])
+                    x, y, w, h = cv2.boundingRect(largest)
+                    widths[name] = w
+                else:
+                    centroids[name] = -1
+                    widths[name] = 0
             else:
                 centroids[name] = -1
+                widths[name] = 0
 
         cx = centroids["bottom"]  # O centroide principal é o mais próximo do robô
 
-        # Uma interseção é detectada se a linha estiver presente em todos os ROIs
-        intersection = all(c != -1 for c in centroids.values())
+        # Uma interseção é detectada se a linha ocupar grande parte do ROI
+        intersection = (
+            all(c != -1 for c in centroids.values())
+            and widths["bottom"] > self.INTERSECTION_WIDTH_THRESHOLD
+        )
 
         # Um gap ocorre quando o ROI inferior não encontra a linha
         # mas algum dos ROIs superiores ainda a detecta
@@ -63,6 +79,30 @@ class Vision:
         mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
         mask_red = cv2.add(mask_red1, mask_red2)
         red_detected = cv2.countNonZero(mask_red) > self.GREEN_THRESHOLD_AREA
+
+        # --- Detecção de marcadores verdes e direção ---
+        green_direction = None
+        green_centroids = []
+        contours_green, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours_green:
+            area = cv2.contourArea(cnt)
+            if area > self.GREEN_THRESHOLD_AREA:
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    gx = int(M["m10"] / M["m00"])
+                    gy = int(M["m01"] / M["m00"])
+                    green_centroids.append((gx, gy))
+
+        if green_centroids:
+            left = any(gx < self.CENTER_X - 50 for gx, _ in green_centroids)
+            right = any(gx > self.CENTER_X + 50 for gx, _ in green_centroids)
+            if left and right:
+                # Dois marcadores verdes, um de cada lado da linha -> retorno de 180°
+                green_direction = "uturn"
+            elif left:
+                green_direction = "left"
+            elif right:
+                green_direction = "right"
 
         obstacle = self.detect_obstacle(mask_black)
 
@@ -98,6 +138,8 @@ class Vision:
             curvature,
             mask_black,
             pixel_count,
+            green_direction,
+            green_centroids,
         )
 
     def calibrate_by_click(self, frame, x, y, color_name):
