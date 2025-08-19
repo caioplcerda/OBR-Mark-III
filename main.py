@@ -157,13 +157,17 @@ class Robot:
                             cv2.circle(frame, (gx, gy), 10, (0, 255, 0), 2)
 
                         if intersection and green_dir:
-                            self.planned_direction = green_dir
-                            if green_dir == "left":
-                                self.last_line_angle = -135
-                            elif green_dir == "right":
-                                self.last_line_angle = -45
+                            if green_dir == "uturn":
+                                self.planned_direction = green_dir
+                                self.state = "TURNING_AROUND"
                             else:
-                                self.last_line_angle = -90
+                                self.planned_direction = green_dir
+                                if green_dir == "left":
+                                    self.last_line_angle = -135
+                                elif green_dir == "right":
+                                    self.last_line_angle = -45
+                                else:
+                                    self.last_line_angle = -90
 
                         if red:
                             self.state = "FINISHING"
@@ -184,6 +188,16 @@ class Robot:
                         time.sleep(0.5)
                         self.hardware.set_motor_speed(50, 0)
                         time.sleep(1)
+                        self.state = "FOLLOWING_LINE"
+
+                    elif self.state == "TURNING_AROUND":
+                        self.log("Dois marcadores verdes detectados. Executando retorno de 180°.")
+                        # Gira no lugar aplicando velocidades opostas por um curto período
+                        self.hardware.set_motor_speed(0, 100)
+                        time.sleep(1)
+                        self.hardware.stop()
+                        # Após virar, o robô olhará para trás (90°)
+                        self.last_line_angle = 90
                         self.state = "FOLLOWING_LINE"
 
                     elif self.state == "FINISHING":

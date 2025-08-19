@@ -97,7 +97,8 @@ class Vision:
             left = any(gx < self.CENTER_X - 50 for gx, _ in green_centroids)
             right = any(gx > self.CENTER_X + 50 for gx, _ in green_centroids)
             if left and right:
-                green_direction = "straight"
+                # Dois marcadores verdes, um de cada lado da linha -> retorno de 180°
+                green_direction = "uturn"
             elif left:
                 green_direction = "left"
             elif right:
