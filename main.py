@@ -148,7 +148,6 @@ class Robot:
                         else:
                             self.hardware.stop()
                             status_data.update({"error": "Line Lost"})
-
                         # Basic detection for interseções e marcadores verdes
                         _, red, _, intersection, _, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
 
