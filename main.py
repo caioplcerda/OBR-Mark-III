@@ -149,8 +149,8 @@ class Robot:
                             self.hardware.stop()
                             status_data.update({"error": "Line Lost"})
 
-                        # Basic detection for intersections, cores e obstáculos
-                        _, red, obstacle, intersection, _, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
+                        # Basic detection for interseções e marcadores verdes
+                        _, red, _, intersection, _, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
 
                         # Desenha marcadores verdes detectados
                         for gx, gy in green_points:
@@ -175,20 +175,7 @@ class Robot:
                         mask = mask_black
                         status_data.update({"green": green_dir, "planned_path": self.planned_direction})
 
-                    elif self.state == "INTERSECTION":
-                        self.log("Interseção detectada. Parando e seguindo em frente.")
-                        self.hardware.stop()
-                        time.sleep(1)
-                        self.hardware.set_motor_speed(50, 0)
-                        self.state = "FOLLOWING_LINE"
-
-                    elif self.state == "AVOIDING_OBSTACLE":
-                        self.log("Obstáculo detectado. Desviando.")
-                        self.hardware.set_motor_speed(40, 100)
-                        time.sleep(0.5)
-                        self.hardware.set_motor_speed(50, 0)
-                        time.sleep(1)
-                        self.state = "FOLLOWING_LINE"
+                    # Estados adicionais (interseção e obstáculos) removidos nesta versão focada no seguidor de linha
 
                     elif self.state == "TURNING_AROUND":
                         self.log("Dois marcadores verdes detectados. Executando retorno de 180°.")
