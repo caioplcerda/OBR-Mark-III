@@ -94,9 +94,16 @@ def scancircle(gray_image, center_point, radius, look_angle_deg, width_deg):
     return scandata, angles
 
 
-def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
+def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details,
+                        min_line_width=10, derivative_threshold=20):
     """
     Finds the line center from a 1D scan array by analyzing its derivative.
+
+    This version is more robust to thicker lines. Instead of blindly picking the
+    global maximum and minimum derivative (which often corresponded to thin
+    edges), we search for a pair of strong edges separated by at least
+    ``min_line_width`` pixels. This helps ignore small/thin lines that may appear
+    in the scan and focuses on wider tape-like lines (e.g. 2 cm wide).
 
     Args:
         scandata (np.array): The 1D array of grayscale values from a scan.
@@ -104,12 +111,16 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
                            For 'line' scan, the starting x-coordinate.
         scan_type (str): 'circle' or 'line'.
         scan_details (dict): Dictionary with additional info like center_point, radius.
+        min_line_width (int, optional): Minimum distance in pixels between the
+            left and right edges. Defaults to 10.
+        derivative_threshold (int, optional): Minimum absolute derivative value
+            required to consider a pixel an edge. Defaults to 20.
 
     Returns:
         tuple: (line_point, derivative)
             - line_point (tuple): The (x, y) coordinate of the detected line center.
             - derivative (np.array): The calculated derivative of the scan.
-        Returns (None, None) if no line is found.
+        Returns (None, None) if no suitable line is found.
     """
     if scandata is None or len(scandata) < 3:
         return None, None
@@ -118,18 +129,25 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
     derivative = np.zeros_like(scandata, dtype=np.float32)
     derivative[1:-1] = scandata[:-2].astype(np.float32) - scandata[2:].astype(np.float32)
 
-    # 2. Find the indices of the left (max derivative) and right (min derivative) edges.
-    # A transition from white (high value) to black (low value) is a positive peak.
-    left_edge_index = np.argmax(derivative)
-    right_edge_index = np.argmin(derivative)
+    # 2. Find candidate left and right edges based on derivative thresholds
+    left_candidates = np.where(derivative > derivative_threshold)[0]
+    right_candidates = np.where(derivative < -derivative_threshold)[0]
 
-    # 3. Basic validation
-    # Check if peaks are significant (threshold can be tuned)
-    if derivative[left_edge_index] < 20 or derivative[right_edge_index] > -20:
+    best_pair = None
+    best_width = 0
+    for li in left_candidates:
+        possible_right = right_candidates[right_candidates > li + min_line_width]
+        if possible_right.size:
+            ri = possible_right[0]
+            width = ri - li
+            if width > best_width:
+                best_pair = (li, ri)
+                best_width = width
+
+    if not best_pair:
         return None, derivative
-    # Check if edges are in the correct order
-    if left_edge_index >= right_edge_index:
-        return None, derivative
+
+    left_edge_index, right_edge_index = best_pair
 
     # 4. Calculate line center in the 1D array
     line_pos_1d_idx = int((left_edge_index + right_edge_index) / 2.0)
