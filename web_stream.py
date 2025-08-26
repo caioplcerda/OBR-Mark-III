@@ -10,12 +10,20 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading')
 
+CONFIG_FILE = "config.json"
+
 # --- Dicionário de Estado Global Compartilhado ---
 SHARED_STATE = {
     "config": {
         "pid": {"kp": 0.4, "ki": 0.0, "kd": 0.1},
-        "hsv_black": { "lower": np.array([0, 0, 0]), "upper": np.array([180, 255, 50]) },
-        "hsv_white": { "lower": np.array([0, 0, 180]), "upper": np.array([180, 25, 255]) }
+        "hsv_black": {"lower": np.array([0, 0, 0]), "upper": np.array([180, 255, 50])},
+        "hsv_white": {"lower": np.array([0, 0, 180]), "upper": np.array([180, 25, 255])},
+        "line_detection": {
+            "derivative_threshold": 20,
+            "min_line_width_ratio": 2.0 / 16.0,
+            "max_line_width_ratio": 3.0 / 16.0,
+            "contrast_threshold": 30,
+        },
     },
     "start_event": threading.Event(),
     "stream_lock": threading.Lock(),
@@ -26,10 +34,52 @@ SHARED_STATE = {
         "motor_speeds": {"left": 0, "right": 0},
         "status_data": {},
         "view_mode": 'normal',
-        "derivative_scan": None
+        "derivative_scan": None,
     },
-    "calibration_request": None
+    "calibration_request": None,
 }
+
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        cfg = SHARED_STATE["config"]
+        if "pid" in data:
+            cfg["pid"].update(data["pid"])
+        if "hsv_black" in data:
+            if "lower" in data["hsv_black"]:
+                cfg["hsv_black"]["lower"] = np.array(data["hsv_black"]["lower"])
+            if "upper" in data["hsv_black"]:
+                cfg["hsv_black"]["upper"] = np.array(data["hsv_black"]["upper"])
+        if "hsv_white" in data:
+            if "lower" in data["hsv_white"]:
+                cfg["hsv_white"]["lower"] = np.array(data["hsv_white"]["lower"])
+            if "upper" in data["hsv_white"]:
+                cfg["hsv_white"]["upper"] = np.array(data["hsv_white"]["upper"])
+        if "line_detection" in data:
+            cfg["line_detection"].update(data["line_detection"])
+
+
+def save_config():
+    cfg = SHARED_STATE["config"]
+    data = {
+        "pid": cfg["pid"],
+        "hsv_black": {
+            "lower": cfg["hsv_black"]["lower"].tolist(),
+            "upper": cfg["hsv_black"]["upper"].tolist(),
+        },
+        "hsv_white": {
+            "lower": cfg["hsv_white"]["lower"].tolist(),
+            "upper": cfg["hsv_white"]["upper"].tolist(),
+        },
+        "line_detection": cfg["line_detection"],
+    }
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f)
+
+
+load_config()
 
 # --- Funções de Logging ---
 def log(message):
@@ -165,7 +215,11 @@ def handle_command(data):
         SHARED_STATE['calibration_request'] = payload
         log(f"Requisição de calibração recebida: {payload}")
     elif command == 'save_config':
-        log("Comando para salvar configuração recebido.")
+        ld = payload.get('line_detection')
+        if ld:
+            SHARED_STATE['config']['line_detection'].update(ld)
+        save_config()
+        log("Configuração salva.")
     else:
         log(f"Comando desconhecido recebido: {command}")
 

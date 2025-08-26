@@ -20,6 +20,7 @@ class Robot:
 
         self.hardware = HardwareControl(SHARED_STATE['config'])
         self.vision = Vision(SHARED_STATE['config'], self.log)
+        adv_vision.update_config(SHARED_STATE['config'].get('line_detection', {}))
 
         self.state = "WAITING"
         # State for advanced line follower
@@ -50,6 +51,7 @@ class Robot:
                     frame_4chan = self.picam2.capture_array()
                     frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
                     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    adv_vision.update_config(SHARED_STATE['config']['line_detection'])
 
                     cal_req = SHARED_STATE.get('calibration_request')
                     if cal_req:
