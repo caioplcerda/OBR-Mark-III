@@ -2,11 +2,26 @@ import cv2
 import numpy as np
 import math
 
-"""
-This module contains the advanced line detection logic ported from the C++
-project 'RCJ_2014.cpp'. It uses grayscale analysis, derivatives, and a
-sequence of scans to robustly find and track a line.
-"""
+"""Advanced line detection utilities with configurable parameters."""
+
+# Default configuration values. They can be updated at runtime via the
+# ``update_config`` function so the web interface can customize the behavior
+# without modifying the code.
+SETTINGS = {
+    "derivative_threshold": 20,
+    # Expected width range for a valid line as a fraction of the scan length.
+    "min_line_width_ratio": 2.0 / 16.0,
+    "max_line_width_ratio": 3.0 / 16.0,
+    # Minimum contrast (outside brightness - inside brightness) required.
+    "contrast_threshold": 30,
+}
+
+
+def update_config(new_settings):
+    """Update line-detection parameters using values from ``new_settings``."""
+    for key in SETTINGS:
+        if key in new_settings:
+            SETTINGS[key] = new_settings[key]
 
 def scanline(gray_image, center_point, radius):
     """
@@ -118,18 +133,50 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
     derivative = np.zeros_like(scandata, dtype=np.float32)
     derivative[1:-1] = scandata[:-2].astype(np.float32) - scandata[2:].astype(np.float32)
 
-    # 2. Find the indices of the left (max derivative) and right (min derivative) edges.
-    # A transition from white (high value) to black (low value) is a positive peak.
-    left_edge_index = np.argmax(derivative)
-    right_edge_index = np.argmin(derivative)
+    # 2. Find candidate edges that exceed the derivative threshold
+    thresh = SETTINGS["derivative_threshold"]
+    left_candidates = np.where(derivative > thresh)[0]
+    right_candidates = np.where(derivative < -thresh)[0]
 
-    # 3. Basic validation
-    # Check if peaks are significant (threshold can be tuned)
-    if derivative[left_edge_index] < 20 or derivative[right_edge_index] > -20:
+    # Expected width range in pixels based on scan length
+    scan_len = len(scandata)
+    min_width = int(scan_len * SETTINGS["min_line_width_ratio"])
+    max_width = int(scan_len * SETTINGS["max_line_width_ratio"])
+
+    # 3. Pair edges and select the best segment within the expected width range
+    # that also has strong contrast between its interior and surrounding
+    # background. This helps ignore thin noise lines and focus on thicker track
+    # lines.
+    best_pair = None
+    best_width = 0
+    for left_idx in left_candidates:
+        for right_idx in right_candidates:
+            if right_idx <= left_idx:
+                continue
+            width = right_idx - left_idx
+            if width <= best_width or width < min_width or width > max_width:
+                continue
+
+            # Compare the average intensity inside the candidate segment with
+            # the average of a small band outside it to estimate contrast.
+            inside_mean = float(np.mean(scandata[left_idx:right_idx]))
+            pad = max(3, width // 4)
+            left_band = scandata[max(0, left_idx - pad):left_idx]
+            right_band = scandata[right_idx:min(len(scandata), right_idx + pad)]
+            if left_band.size + right_band.size == 0:
+                continue
+            outside_mean = float(np.mean(np.concatenate((left_band, right_band))))
+            contrast = outside_mean - inside_mean
+            if contrast < SETTINGS["contrast_threshold"]:
+                continue
+
+            best_pair = (left_idx, right_idx)
+            best_width = width
+
+    if best_pair is None:
         return None, derivative
-    # Check if edges are in the correct order
-    if left_edge_index >= right_edge_index:
-        return None, derivative
+
+    left_edge_index, right_edge_index = best_pair
 
     # 4. Calculate line center in the 1D array
     line_pos_1d_idx = int((left_edge_index + right_edge_index) / 2.0)
