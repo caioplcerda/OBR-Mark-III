@@ -22,7 +22,6 @@ class Vision:
         self.GREEN_THRESHOLD_AREA = 5000
         self.OBSTACLE_MIN_AREA = 2000
         self.OBSTACLE_REGION_Y = 100
-        self.INTERSECTION_WIDTH_THRESHOLD = int(self.FRAME_WIDTH * 0.8)
 
     def detect_line_features(self, frame):
         """ Detecta características da linha, como centroide, interseções e obstáculos. """
@@ -44,7 +43,6 @@ class Vision:
         }
 
         centroids = {}
-        widths = {}
         for name, roi in rois.items():
             contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
@@ -52,22 +50,15 @@ class Vision:
                 M = cv2.moments(largest)
                 if M["m00"] != 0:
                     centroids[name] = int(M["m10"] / M["m00"])
-                    x, y, w, h = cv2.boundingRect(largest)
-                    widths[name] = w
                 else:
                     centroids[name] = -1
-                    widths[name] = 0
             else:
                 centroids[name] = -1
-                widths[name] = 0
 
         cx = centroids["bottom"]  # O centroide principal é o mais próximo do robô
 
-        # Uma interseção é detectada se a linha ocupar grande parte do ROI
-        intersection = (
-            all(c != -1 for c in centroids.values())
-            and widths["bottom"] > self.INTERSECTION_WIDTH_THRESHOLD
-        )
+        # Interseção detectada se a linha aparecer em todos os ROIs
+        intersection = all(c != -1 for c in centroids.values())
 
         # Detecção da linha de chegada (vermelho)
         mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
