@@ -107,9 +107,16 @@ def scancircle(gray_image, center_point, radius, look_angle_deg, width_deg):
     return scandata, angles
 
 
-def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
+def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details,
+                        min_line_width=10, derivative_threshold=20):
     """
     Finds the line center from a 1D scan array by analyzing its derivative.
+
+    This version is more robust to thicker lines. Instead of blindly picking the
+    global maximum and minimum derivative (which often corresponded to thin
+    edges), we search for a pair of strong edges separated by at least
+    ``min_line_width`` pixels. This helps ignore small/thin lines that may appear
+    in the scan and focuses on wider tape-like lines (e.g. 2 cm wide).
 
     Args:
         scandata (np.array): The 1D array of grayscale values from a scan.
@@ -117,12 +124,16 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
                            For 'line' scan, the starting x-coordinate.
         scan_type (str): 'circle' or 'line'.
         scan_details (dict): Dictionary with additional info like center_point, radius.
+        min_line_width (int, optional): Minimum distance in pixels between the
+            left and right edges. Defaults to 10.
+        derivative_threshold (int, optional): Minimum absolute derivative value
+            required to consider a pixel an edge. Defaults to 20.
 
     Returns:
         tuple: (line_point, derivative)
             - line_point (tuple): The (x, y) coordinate of the detected line center.
             - derivative (np.array): The calculated derivative of the scan.
-        Returns (None, None) if no line is found.
+        Returns (None, None) if no suitable line is found.
     """
     if scandata is None or len(scandata) < 3:
         return None, None
