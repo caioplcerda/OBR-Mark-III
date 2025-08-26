@@ -8,6 +8,19 @@ project 'RCJ_2014.cpp'. It uses grayscale analysis, derivatives, and a
 sequence of scans to robustly find and track a line.
 """
 
+# Threshold for detecting strong edges in the derivative array
+DERIVATIVE_THRESHOLD = 20
+
+# Minimum expected width (in pixels) for a valid line. Lines thinner than this
+# are ignored so that the detector focuses on thicker track lines (~2 cm).
+MIN_LINE_WIDTH_PIXELS = 20
+
+# Minimum contrast (outside brightness - inside brightness) required for a
+# candidate segment to be considered a real line. This helps reject thin noise
+# edges that may still produce large derivatives but have little intensity
+# contrast with the background.
+CONTRAST_THRESHOLD = 30
+
 def scanline(gray_image, center_point, radius):
     """
     Scans a horizontal line on the image and returns the grayscale values.
@@ -129,22 +142,40 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details,
     derivative = np.zeros_like(scandata, dtype=np.float32)
     derivative[1:-1] = scandata[:-2].astype(np.float32) - scandata[2:].astype(np.float32)
 
-    # 2. Find candidate left and right edges based on derivative thresholds
-    left_candidates = np.where(derivative > derivative_threshold)[0]
-    right_candidates = np.where(derivative < -derivative_threshold)[0]
+    # 2. Find candidate edges that exceed the derivative threshold
+    left_candidates = np.where(derivative > DERIVATIVE_THRESHOLD)[0]
+    right_candidates = np.where(derivative < -DERIVATIVE_THRESHOLD)[0]
 
+    # 3. Pair edges and select the widest segment that also has strong contrast
+    # between its interior and the surrounding background. This helps ignore
+    # thin noise lines and focus on thicker track lines.
     best_pair = None
     best_width = 0
-    for li in left_candidates:
-        possible_right = right_candidates[right_candidates > li + min_line_width]
-        if possible_right.size:
-            ri = possible_right[0]
-            width = ri - li
-            if width > best_width:
-                best_pair = (li, ri)
-                best_width = width
+    for left_idx in left_candidates:
+        for right_idx in right_candidates:
+            if right_idx <= left_idx:
+                continue
+            width = right_idx - left_idx
+            if width <= best_width or width < MIN_LINE_WIDTH_PIXELS:
+                continue
 
-    if not best_pair:
+            # Compare the average intensity inside the candidate segment with
+            # the average of a small band outside it to estimate contrast.
+            inside_mean = float(np.mean(scandata[left_idx:right_idx]))
+            pad = max(3, width // 4)
+            left_band = scandata[max(0, left_idx - pad):left_idx]
+            right_band = scandata[right_idx:min(len(scandata), right_idx + pad)]
+            if left_band.size + right_band.size == 0:
+                continue
+            outside_mean = float(np.mean(np.concatenate((left_band, right_band))))
+            contrast = outside_mean - inside_mean
+            if contrast < CONTRAST_THRESHOLD:
+                continue
+
+            best_pair = (left_idx, right_idx)
+            best_width = width
+
+    if best_pair is None:
         return None, derivative
 
     left_edge_index, right_edge_index = best_pair
