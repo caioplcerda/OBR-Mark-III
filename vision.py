@@ -61,18 +61,18 @@ class Vision:
                 centroids[name] = -1
                 widths[name] = 0
 
-        cx = centroids["bottom"]  # O centroide principal é o mais próximo do robô
+        # Define o centroide principal como o primeiro disponível de baixo para cima
+        cx = -1
+        for level in ["bottom", "middle", "top"]:
+            if centroids[level] != -1:
+                cx = centroids[level]
+                break
 
-        # Uma interseção é detectada se a linha ocupar grande parte do ROI
+        # Uma interseção é detectada se a linha ocupar grande parte do ROI inferior
         intersection = (
             all(c != -1 for c in centroids.values())
             and widths["bottom"] > self.INTERSECTION_WIDTH_THRESHOLD
         )
-
-        # Um gap ocorre quando o ROI inferior não encontra a linha
-        # mas algum dos ROIs superiores ainda a detecta
-        gap_detected = (centroids["bottom"] == -1 and \
-                        (centroids["middle"] != -1 or centroids["top"] != -1))
 
         # Detecção da linha de chegada (vermelho)
         mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
@@ -133,7 +133,6 @@ class Vision:
             red_detected,
             obstacle,
             intersection,
-            gap_detected,
             centroids,
             curvature,
             mask_black,

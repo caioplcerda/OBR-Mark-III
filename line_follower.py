@@ -18,29 +18,17 @@ class LineFollower:
         self.error_buffer = deque(maxlen=5)
         self.last_error = 0
         self.last_base_speed = self.BASE_SPEED
-        self.gap_frames = 0
-        self.GAP_HOLD_FRAMES = 5
 
     def follow_line(self, frame):
         """ Executa a lógica de seguimento de linha para um único frame. """
-        # detect_line_features agora retorna 10 valores, incluindo gap e curvatura
-        cx, _, _, _, _, gap, centroids, curvature, _, _ = self.vision.detect_line_features(frame)
+        # detect_line_features retorna características da linha e do cenário
+        cx, _, _, _, centroids, curvature, _, _, _, _ = self.vision.detect_line_features(frame)
         status = ""
 
-        # Se a linha foi totalmente perdida e não estamos em modo de pular gap
-        if cx == -1 and not (gap or self.gap_frames > 0):
+        # Se a linha foi totalmente perdida, parar o robô
+        if cx == -1:
             status = "Linha perdida. Parando."
             self.hardware_control.stop()
-            return status, self.path_history
-
-        # Se detectamos um gap, manter direção por alguns frames
-        if cx == -1 and (gap or self.gap_frames > 0):
-            if gap:
-                self.gap_frames = self.GAP_HOLD_FRAMES
-            else:
-                self.gap_frames -= 1
-            self.hardware_control.set_motor_speed(self.last_base_speed, self.last_error)
-            status = "Gap detectado. Mantendo direção."
             return status, self.path_history
 
         # --- Velocidade Adaptativa ---
