@@ -69,11 +69,6 @@ class Vision:
             and widths["bottom"] > self.INTERSECTION_WIDTH_THRESHOLD
         )
 
-        # Um gap ocorre quando o ROI inferior não encontra a linha
-        # mas algum dos ROIs superiores ainda a detecta
-        gap_detected = (centroids["bottom"] == -1 and \
-                        (centroids["middle"] != -1 or centroids["top"] != -1))
-
         # Detecção da linha de chegada (vermelho)
         mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
         mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
@@ -133,7 +128,6 @@ class Vision:
             red_detected,
             obstacle,
             intersection,
-            gap_detected,
             centroids,
             curvature,
             mask_black,

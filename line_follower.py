@@ -1,4 +1,3 @@
-import time
 from collections import deque
 from hardware_control import HardwareControl
 from vision import Vision
@@ -16,32 +15,22 @@ class LineFollower:
 
         # Histórico para suavização do erro
         self.error_buffer = deque(maxlen=5)
-        self.last_error = 0
-        self.last_base_speed = self.BASE_SPEED
-        self.gap_frames = 0
-        self.GAP_HOLD_FRAMES = 5
 
     def follow_line(self, frame):
         """ Executa a lógica de seguimento de linha para um único frame. """
-        # detect_line_features agora retorna 10 valores, incluindo gap e curvatura
-        cx, _, _, _, _, gap, centroids, curvature, _, _ = self.vision.detect_line_features(frame)
+        cx, _, _, _, centroids, curvature, _, _, _ = self.vision.detect_line_features(frame)
         status = ""
 
-        # Se a linha foi totalmente perdida e não estamos em modo de pular gap
-        if cx == -1 and not (gap or self.gap_frames > 0):
-            status = "Linha perdida. Parando."
-            self.hardware_control.stop()
-            return status, self.path_history
-
-        # Se detectamos um gap, manter direção por alguns frames
-        if cx == -1 and (gap or self.gap_frames > 0):
-            if gap:
-                self.gap_frames = self.GAP_HOLD_FRAMES
+        # Se o centroide principal não for encontrado, tenta usar ROIs superiores
+        if cx == -1:
+            if centroids['middle'] != -1:
+                cx = centroids['middle']
+            elif centroids['top'] != -1:
+                cx = centroids['top']
             else:
-                self.gap_frames -= 1
-            self.hardware_control.set_motor_speed(self.last_base_speed, self.last_error)
-            status = "Gap detectado. Mantendo direção."
-            return status, self.path_history
+                status = "Linha perdida. Parando."
+                self.hardware_control.stop()
+                return status, self.path_history
 
         # --- Velocidade Adaptativa ---
         max_speed = 80
@@ -60,9 +49,6 @@ class LineFollower:
         # Suavização do erro com média móvel
         self.error_buffer.append(error)
         filtered_error = sum(self.error_buffer) / len(self.error_buffer)
-
-        self.last_error = filtered_error
-        self.last_base_speed = base_speed
 
         self.hardware_control.set_motor_speed(base_speed, filtered_error)
 
