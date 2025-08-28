@@ -1,13 +1,18 @@
 import RPi.GPIO as GPIO
 import time
 
-# Pin definitions for TB6612FNG motor driver
-AIN1 = 17
-AIN2 = 27
-PWMA = 22
-BIN1 = 23
-BIN2 = 24
-PWMB = 25
+# Pin definitions for two TB6612FNG motor drivers (both using channel B)
+# Left motor driver
+L_BIN1 = 17
+L_BIN2 = 27
+L_PWMB = 22
+
+# Right motor driver
+R_BIN1 = 23
+R_BIN2 = 24
+R_PWMB = 25
+
+# Shared standby pin
 STBY = 5
 
 
@@ -16,27 +21,28 @@ def main():
     GPIO.setwarnings(False)
 
     # Setup motor pins
-    for pin in [AIN1, AIN2, BIN1, BIN2, STBY]:
+    for pin in [L_BIN1, L_BIN2, R_BIN1, R_BIN2, STBY]:
         GPIO.setup(pin, GPIO.OUT)
-    GPIO.setup(PWMA, GPIO.OUT)
-    GPIO.setup(PWMB, GPIO.OUT)
+    GPIO.setup(L_PWMB, GPIO.OUT)
+    GPIO.setup(R_PWMB, GPIO.OUT)
 
-    pwm_a = GPIO.PWM(PWMA, 100)
-    pwm_b = GPIO.PWM(PWMB, 100)
-    pwm_a.start(0)
-    pwm_b.start(0)
+    pwm_left = GPIO.PWM(L_PWMB, 100)
+    pwm_right = GPIO.PWM(R_PWMB, 100)
+    pwm_left.start(0)
+    pwm_right.start(0)
 
     # Enable motor driver
     GPIO.output(STBY, GPIO.HIGH)
 
     try:
         # Drive both motors forward at 50% duty cycle
-        GPIO.output(AIN1, GPIO.HIGH)
-        GPIO.output(AIN2, GPIO.LOW)
-        GPIO.output(BIN1, GPIO.HIGH)
-        GPIO.output(BIN2, GPIO.LOW)
-        pwm_a.ChangeDutyCycle(50)
-        pwm_b.ChangeDutyCycle(50)
+        GPIO.output(L_BIN1, GPIO.HIGH)
+        GPIO.output(L_BIN2, GPIO.LOW)
+        GPIO.output(R_BIN1, GPIO.HIGH)
+        GPIO.output(R_BIN2, GPIO.LOW)
+        pwm_left.ChangeDutyCycle(50)
+        pwm_right.ChangeDutyCycle(50)
+
         print("Motors running forward. Press Ctrl+C to stop.")
         # Keep running until interrupted
         while True:
@@ -44,12 +50,12 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if pwm_a:
-            pwm_a.stop()
-            pwm_a = None
-        if pwm_b:
-            pwm_b.stop()
-            pwm_b = None
+        if pwm_left:
+            pwm_left.stop()
+            pwm_left = None
+        if pwm_right:
+            pwm_right.stop()
+            pwm_right = None
         GPIO.output(STBY, GPIO.LOW)
         GPIO.cleanup()
 
