@@ -37,7 +37,6 @@ def main():
         GPIO.output(BIN2, GPIO.LOW)
         pwm_a.ChangeDutyCycle(50)
         pwm_b.ChangeDutyCycle(50)
-
         print("Motors running forward. Press Ctrl+C to stop.")
         # Keep running until interrupted
         while True:
