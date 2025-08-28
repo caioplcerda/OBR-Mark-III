@@ -40,8 +40,8 @@ def main():
         GPIO.output(L_BIN2, GPIO.LOW)
         GPIO.output(R_BIN1, GPIO.HIGH)
         GPIO.output(R_BIN2, GPIO.LOW)
-        pwm_left.ChangeDutyCycle(50)
-        pwm_right.ChangeDutyCycle(50)
+        pwm_left.ChangeDutyCycle(100)
+        pwm_right.ChangeDutyCycle(-100)
 
         print("Motors running forward. Press Ctrl+C to stop.")
         # Keep running until interrupted
