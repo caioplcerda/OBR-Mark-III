@@ -13,6 +13,7 @@ STBY = 5
 
 def main():
     GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
 
     # Setup motor pins
     for pin in [AIN1, AIN2, BIN1, BIN2, STBY]:
@@ -36,15 +37,19 @@ def main():
         GPIO.output(BIN2, GPIO.LOW)
         pwm_a.ChangeDutyCycle(50)
         pwm_b.ChangeDutyCycle(50)
-
+        print("Motors running forward. Press Ctrl+C to stop.")
         # Keep running until interrupted
         while True:
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     finally:
-        pwm_a.stop()
-        pwm_b.stop()
+        if pwm_a:
+            pwm_a.stop()
+            pwm_a = None
+        if pwm_b:
+            pwm_b.stop()
+            pwm_b = None
         GPIO.output(STBY, GPIO.LOW)
         GPIO.cleanup()
 
