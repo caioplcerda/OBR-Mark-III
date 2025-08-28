@@ -85,7 +85,7 @@ class Robot:
                         scandata, start_x = adv_vision.scanline(frame_gray, scan_center_0, scan_radius_0)
                         scan_details = {'center_point': scan_center_0, 'radius': scan_radius_0}
                         p0, deriv0 = adv_vision.find_line_from_scan(
-                            scandata, start_x, 'line', scan_details)
+                            scandata, start_x, 'line', scan_details, min_line_width=20)
 
                         if p0:
                             scan_points.append(p0)
@@ -116,6 +116,7 @@ class Robot:
                                     angles,
                                     'circle',
                                     scan_details,
+                                    min_line_width=20,
                                 )
 
                                 if p_next:
