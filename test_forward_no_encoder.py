@@ -36,10 +36,10 @@ def main():
 
     try:
         # Drive both motors forward at 50% duty cycle
-        GPIO.output(L_BIN1, GPIO.LOW)
-        GPIO.output(L_BIN2, GPIO.HIGH)
-        GPIO.output(R_BIN1, GPIO.HIGH)
-        GPIO.output(R_BIN2, GPIO.LOW)
+        GPIO.output(L_BIN1, GPIO.HIGH)
+        GPIO.output(L_BIN2, GPIO.LOW)
+        GPIO.output(R_BIN1, GPIO.LOW)
+        GPIO.output(R_BIN2, GPIO.HIGH)
         pwm_left.ChangeDutyCycle(100)
         pwm_right.ChangeDutyCycle(100)
 
