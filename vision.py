@@ -119,9 +119,8 @@ class Vision:
         # This translates to OpenCV angles where 0 is right, 90 is up, 180 is left, 270 is down.
         # C++ angle -> CV angle: cv_angle = 270 - cpp_angle
         center_angle_cv = (270 - look_angle) % 360
-        # The start and end angles for the arc must be integers for cv2.ellipse2Poly.
-        angle_start = int(center_angle_cv - width / 2)
-        angle_end = int(center_angle_cv + width / 2)
+        angle_start = center_angle_cv - width / 2
+        angle_end = center_angle_cv + width / 2
 
         # Get points for the arc using OpenCV
         axes = (radius, radius)
