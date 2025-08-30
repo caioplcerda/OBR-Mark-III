@@ -1,227 +1,160 @@
+# web_stream.py
+# Flask + Socket.IO com estado compartilhado e streaming MJPEG do last_frame.
+
 import cv2
-import numpy as np
-import os
-import json
+from flask import Flask, Response, request, render_template_string, send_from_directory, jsonify
+from flask_socketio import SocketIO, emit
 import threading
 import time
-from flask import Flask, Response, render_template_string, request, jsonify
-from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
-socketio = SocketIO(app, async_mode='threading')
+socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
-CONFIG_FILE = "config.json"
-
-# --- Dicionário de Estado Global Compartilhado ---
+# Estado compartilhado (será substituído pelo main.py se ele importar e usar)
 SHARED_STATE = {
-    "config": {
-        "pid": {"kp": 0.4, "ki": 0.0, "kd": 0.1},
-        "hsv_black": {"lower": np.array([0, 0, 0]), "upper": np.array([180, 255, 50])},
-        "hsv_white": {"lower": np.array([0, 0, 180]), "upper": np.array([180, 25, 255])},
-        "line_detection": {
-            "derivative_threshold": 20,
-            "min_line_width_ratio": 2.0 / 16.0,
-            "max_line_width_ratio": 3.0 / 16.0,
-            "contrast_threshold": 30,
-        },
-    },
-    "start_event": threading.Event(),
-    "stream_lock": threading.Lock(),
-    "stream_data": {
-        "last_frame": np.zeros((480, 640, 3), dtype=np.uint8),
-        "last_mask": np.zeros((480, 640), dtype=np.uint8),
-        "path_history": [],
-        "motor_speeds": {"left": 0, "right": 0},
-        "status_data": {},
-        "view_mode": 'normal',
-        "derivative_scan": None,
-    },
-    "calibration_request": None,
+    "config": {},
+    "last_frame": None,          # numpy BGR
+    "speeds": {"left": 0, "right": 0},
+    "status": "idle",
+    "view_mode": "normal",
+    "derivative_scan": None,
+    "path_history": [],
+    "log": [],
+    "fps": 0.0,
 }
 
+_robot = None
+_state_lock = threading.Lock()
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            data = json.load(f)
-        cfg = SHARED_STATE["config"]
-        if "pid" in data:
-            cfg["pid"].update(data["pid"])
-        if "hsv_black" in data:
-            if "lower" in data["hsv_black"]:
-                cfg["hsv_black"]["lower"] = np.array(data["hsv_black"]["lower"])
-            if "upper" in data["hsv_black"]:
-                cfg["hsv_black"]["upper"] = np.array(data["hsv_black"]["upper"])
-        if "hsv_white" in data:
-            if "lower" in data["hsv_white"]:
-                cfg["hsv_white"]["lower"] = np.array(data["hsv_white"]["lower"])
-            if "upper" in data["hsv_white"]:
-                cfg["hsv_white"]["upper"] = np.array(data["hsv_white"]["upper"])
-        if "line_detection" in data:
-            cfg["line_detection"].update(data["line_detection"])
+def register_robot(robot):
+    global _robot
+    _robot = robot
 
+# ---- Helpers ----
+def _get_frame_bgr():
+    with _state_lock:
+        return SHARED_STATE.get("last_frame", None)
 
-def save_config():
-    cfg = SHARED_STATE["config"]
-    data = {
-        "pid": cfg["pid"],
-        "hsv_black": {
-            "lower": cfg["hsv_black"]["lower"].tolist(),
-            "upper": cfg["hsv_black"]["upper"].tolist(),
-        },
-        "hsv_white": {
-            "lower": cfg["hsv_white"]["lower"].tolist(),
-            "upper": cfg["hsv_white"]["upper"].tolist(),
-        },
-        "line_detection": cfg["line_detection"],
-    }
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f)
+def _log(msg):
+    with _state_lock:
+        SHARED_STATE["log"].append(msg)
+        SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
 
+# ---- MJPEG stream ----
+def mjpeg_generator():
+    while True:
+        frame = _get_frame_bgr()
+        if frame is None:
+            # antes do robô iniciar, aguarda um pouco
+            time.sleep(0.05)
+            continue
+        try:
+            # codifica BGR -> JPEG
+            ok, jpg = cv2.imencode(".jpg", frame)
+            if not ok:
+                time.sleep(0.01)
+                continue
+            data = jpg.tobytes()
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
+        except Exception:
+            time.sleep(0.01)
 
-load_config()
+# ---- Rotas HTTP ----
+@app.route("/")
+def root():
+    # se você já tem um index.html na pasta do projeto, sirva-o:
+    return send_from_directory(".", "index.html")
 
-# --- Funções de Logging ---
-def log(message):
-    timestamp = time.strftime("%H:%M:%S")
-    full_message = f"[{timestamp}] {message}"
-    print(full_message)  # Mantém o log no console do servidor
-    socketio.emit('log_message', {'data': full_message})
+@app.route("/index.html")
+def serve_index():
+    return send_from_directory(".", "index.html")
 
-def create_derivative_graph(derivative_data, width, height):
-    """ Gera uma imagem com o gráfico da derivada da varredura. """
-    if derivative_data is None or len(derivative_data) == 0:
-        graph = np.full((height, width, 3), (255, 255, 255), dtype=np.uint8)
-        cv2.putText(graph, "No derivative data", (width // 4, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
-        return graph
+@app.route("/stream")
+def stream():
+    return Response(mjpeg_generator(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
-    graph = np.full((height, width, 3), (255, 255, 255), dtype=np.uint8)
-    center_y = height // 2
-    cv2.line(graph, (0, center_y), (width, center_y), (150, 150, 150), 1)
+@app.route("/state")
+def state():
+    # endpoint útil para debug da UI
+    with _state_lock:
+        return jsonify({
+            "status": SHARED_STATE.get("status", ""),
+            "speeds": SHARED_STATE.get("speeds", {}),
+            "fps": SHARED_STATE.get("fps", 0),
+            "view_mode": SHARED_STATE.get("view_mode", "normal"),
+        })
 
-    num_points = len(derivative_data)
-    x_coords = np.linspace(0, width - 1, num_points).astype(int)
+# ---- Socket.IO ----
+@socketio.on("connect")
+def on_connect():
+    emit("log_message", {"text": "Socket conectado."})
+    # envia um snapshot de status
+    with _state_lock:
+        emit("status", {
+            "status": SHARED_STATE.get("status", "idle"),
+            "speeds": SHARED_STATE.get("speeds", {"left": 0, "right": 0}),
+            "fps": SHARED_STATE.get("fps", 0)
+        })
 
-    max_val = np.max(np.abs(derivative_data))
-    if max_val < 1: max_val = 1.0
+@socketio.on("command")
+def on_command(cmd):
+    """
+    Espera payloads como:
+      {"name":"start_robot"}
+      {"name":"stop_robot"}
+      {"name":"set_view_mode","data":{"mode":"mask"}}
+      {"name":"calibrate_pixel","data":{"x":123,"y":321,"color":"green"}}
+      {"name":"save_config","data":{"vision":{...},"pid":{...}}}
+    """
+    global _robot
+    name = (cmd or {}).get("name", "")
+    data = (cmd or {}).get("data", {}) or {}
 
-    y_coords = center_y - (derivative_data * (height / 2 - 10) / max_val).astype(int)
+    if _robot is None:
+        emit("log_message", {"text": "Nenhum robô registrado ainda."})
+        return
 
-    points = np.column_stack((x_coords, y_coords))
-    cv2.polylines(graph, [points], isClosed=False, color=(0, 0, 255), thickness=1)
-
-    left_edge_idx = np.argmax(derivative_data)
-    right_edge_idx = np.argmin(derivative_data)
-
-    cv2.circle(graph, (x_coords[left_edge_idx], y_coords[left_edge_idx]), 7, (0, 255, 0), -1)
-    cv2.circle(graph, (x_coords[right_edge_idx], y_coords[right_edge_idx]), 7, (255, 0, 0), -1)
-
-    return graph
-
-
-# --- Rotas Flask ---
-@app.route('/')
-def index():
-    return render_template_string(open('index.html').read(), config=SHARED_STATE['config'])
-
-@app.route('/stream')
-def stream_route():
-    def generate():
-        while True:
-            try:
-                with SHARED_STATE['stream_lock']:
-                    s_data = SHARED_STATE['stream_data']
-                    frame = s_data['last_frame'].copy()
-                    mask = s_data['last_mask'].copy()
-                    view_mode = s_data['view_mode']
-                    path = list(s_data['path_history'])
-                    status = dict(s_data['status_data'])
-                    speeds = dict(s_data['motor_speeds'])
-                    derivative_scan = s_data.get('derivative_scan')
-
-                if frame is None or frame.size == 0:
-                    time.sleep(0.1)
-                    continue
-
-                if view_mode == 'mask':
-                    output_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-                elif view_mode == 'derivative':
-                    output_frame = create_derivative_graph(derivative_scan, frame.shape[1], frame.shape[0])
-                else:
-                    output_frame = frame
-                    if view_mode == 'contours' and mask is not None and mask.size > 0:
-                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        cv2.drawContours(output_frame, contours, -1, (0, 255, 0), 2)
-
-                    if path:
-                        # Desenha as linhas de conexão (azul)
-                        for i in range(1, len(path)):
-                            if path[i-1] and path[i]:
-                                p1 = tuple(map(int, path[i-1]))
-                                p2 = tuple(map(int, path[i]))
-                                cv2.line(output_frame, p1, p2, (255, 0, 0), 2)
-                        # Desenha os pontos detectados (vermelho)
-                        for point in path:
-                            p = tuple(map(int, point))
-                            cv2.circle(output_frame, p, 5, (0, 0, 255), -1)
+    try:
+        if name == "start_robot":
+            _robot.start()
+            emit("log_message", {"text": "Robô iniciado."})
+        elif name == "stop_robot":
+            _robot.stop()
+            emit("log_message", {"text": "Robô parado."})
+        elif name == "set_view_mode":
+            _robot.set_view_mode(data.get("mode", "normal"))
+        elif name == "calibrate_pixel":
+            x = int(data.get("x", 0))
+            y = int(data.get("y", 0))
+            color = data.get("color", "black")
+            ok = _robot.calibrate_pixel(x, y, color)
+            emit("log_message", {"text": f"Calibração ({color}) {x},{y} -> {ok}"})
+        elif name == "save_config":
+            ok = _robot.save_config(data)
+            emit("log_message", {"text": f"Config salva: {ok}"})
+        else:
+            emit("log_message", {"text": f"Comando desconhecido: {name}"})
+    except Exception as e:
+        emit("log_message", {"text": f"Erro ao executar comando {name}: {e}"})
 
 
-                    y_pos = 30
-                    for key, value in status.items():
-                        text = f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}"
-                        cv2.putText(output_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                        y_pos += 20
+# ---- Utilitário chamado periodicamente pelo main (opcional) ----
+def update_stream_data(frame, mask, contours, speeds, status_data, derivative_data):
+    """
+    Se o seu main quiser empurrar dados por aqui, mantenho compatibilidade.
+    A versão atual do main atualiza SHARED_STATE diretamente, então isso é opcional.
+    """
+    with _state_lock:
+        SHARED_STATE["last_frame"] = frame
+        SHARED_STATE["speeds"] = speeds or SHARED_STATE["speeds"]
+        if status_data and "status" in status_data:
+            SHARED_STATE["status"] = status_data["status"]
+        if derivative_data is not None:
+            SHARED_STATE["derivative_scan"] = derivative_data
 
-                    speed_text = f"L: {speeds.get('left', 0):.1f} | R: {speeds.get('right', 0):.1f}"
-                    cv2.putText(output_frame, speed_text, (10, y_pos + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # Converte o frame para RGB antes de encodar para JPEG, corrigindo as cores no navegador.
-                output_frame_rgb = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB)
-                ret, buffer = cv2.imencode('.jpg', output_frame_rgb)
-                if ret:
-                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-            except Exception as e:
-                log(f"Erro no stream de vídeo: {e}")
-                # Em caso de erro, gera um frame de erro para não quebrar o stream
-                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(error_frame, "Erro no Stream", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                ret, buffer = cv2.imencode('.jpg', error_frame)
-                if ret:
-                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-            time.sleep(0.03)
-
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# --- Handlers de SocketIO ---
-@socketio.on('connect')
-def handle_connect():
-    log("Cliente conectado ao WebSocket")
-
-@socketio.on('command')
-def handle_command(data):
-    command = data.get('command')
-    payload = data.get('payload', {})
-    log(f"Comando '{command}' recebido via WebSocket com payload: {payload}")
-
-    if command == 'start_robot':
-        SHARED_STATE['start_event'].set()
-    elif command == 'set_view_mode':
-        with SHARED_STATE['stream_lock']:
-            SHARED_STATE['stream_data']['view_mode'] = payload.get('mode', 'normal')
-        log(f"Modo de visualização alterado para: {SHARED_STATE['stream_data']['view_mode']}")
-    elif command == 'calibrate_pixel':
-        SHARED_STATE['calibration_request'] = payload
-        log(f"Requisição de calibração recebida: {payload}")
-    elif command == 'save_config':
-        ld = payload.get('line_detection')
-        if ld:
-            SHARED_STATE['config']['line_detection'].update(ld)
-        save_config()
-        log("Configuração salva.")
-    else:
-        log(f"Comando desconhecido recebido: {command}")
-
-def run_stream():
-    socketio.run(app, host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    # útil se quiser testar este arquivo isolado (sem o main)
+    socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
