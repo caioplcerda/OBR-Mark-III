@@ -4,6 +4,25 @@ import math
 """Utility functions mirroring the RCJ 2014 line detection logic."""
 
 
+# Store runtime configuration passed in from ``main.py``.  The helpers in this
+# module are mostly stateless, but ``update_config`` keeps compatibility with
+# the previous API which expected a mutable configuration object.
+CONFIG = {}
+
+
+def update_config(new_cfg):
+    """Update internal configuration with values from ``new_cfg``.
+
+    The line detection helpers do not currently use these settings directly,
+    but keeping this function allows ``main.py`` to call it without raising
+    errors and makes it easy to wire configuration parameters in the future.
+    """
+
+    if not isinstance(new_cfg, dict):
+        return
+    CONFIG.update(new_cfg)
+
+
 def scanline(gray_image, center_point, radius):
     """Scan a horizontal line centered at ``center_point``.
 
@@ -64,8 +83,31 @@ def scancircle(gray_image, center_point, radius, look_angle_deg, width_deg):
     return scandata, angles
 
 
-def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
-    """Locate the line center using the raw derivative approach from RCJ."""
+def find_line_from_scan(
+    scandata,
+    angles_or_start_x,
+    scan_type,
+    scan_details,
+    min_line_width=0,
+):
+    """Locate the line center using the raw derivative approach from RCJ.
+
+    Parameters
+    ----------
+    scandata : array-like
+        Samples from ``scanline`` or ``scancircle``.
+    angles_or_start_x : array-like or int
+        Angles array for circular scans or starting ``x`` for line scans.
+    scan_type : {"line", "circle"}
+        Type of scan performed.
+    scan_details : dict
+        Extra details like the scan center and radius.
+    min_line_width : int, optional
+        Minimum distance between the detected left and right edges.  If the
+        measured width is below this value the function returns ``None`` to
+        signal that a valid line was not found.
+    """
+
     if scandata is None or len(scandata) < 3:
         return None, None
 
@@ -74,7 +116,7 @@ def find_line_from_scan(scandata, angles_or_start_x, scan_type, scan_details):
 
     left_idx = int(np.argmax(derivative))
     right_idx = int(np.argmin(derivative))
-    if left_idx == right_idx:
+    if left_idx == right_idx or abs(right_idx - left_idx) < min_line_width:
         return None, derivative
 
     line_pos = int((left_idx + right_idx) / 2)
