@@ -1,174 +1,103 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Controle e Calibração do Robô</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
-        .container { max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        h1, h2 { color: #333; }
-        .main-layout { display: flex; gap: 20px; flex-wrap: wrap; }
-        .stream-section { flex: 2; min-width: 640px; }
-        .controls-section { flex: 1; min-width: 300px; }
-        #video-stream { width: 100%; height: auto; border: 1px solid #ccc; background-color: #000; }
-        .button-group { margin-bottom: 20px; }
-        button { padding: 10px 15px; border: none; border-radius: 5px; background-color: #007bff; color: white; cursor: pointer; margin-right: 10px; }
-        button:hover { background-color: #0056b3; }
-        #log-console { height: 300px; background: #222; color: #0f0; padding: 10px; overflow-y: scroll; border-radius: 5px; font-family: 'Courier New', Courier, monospace; }
-        .control-item { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; }
-        select, input { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
-    </style>
+  <meta charset="utf-8">
+  <title>OBR Line Follower</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    #video { border: 1px solid #ccc; }
+    #log { height: 160px; overflow: auto; background: #111; color:#0f0; padding:8px; }
+    button { margin-right: 8px; margin-bottom:8px; }
+    .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Painel de Controle do Robô</h1>
-        <div class="main-layout">
-            <div class="stream-section">
-                <h2>Video Stream</h2>
-                <img id="video-stream" src="/stream" width="640" height="480" alt="Video Stream">
-                <div class="button-group">
-                    <button id="view-normal">Visão Normal</button>
-                    <button id="view-mask">Máscara</button>
-                    <button id="view-contours">Contornos</button>
-                    <button id="view-derivative">Derivadas</button>
-                </div>
-            </div>
-            <div class="controls-section">
-                <h2>Controles</h2>
-                <div class="button-group">
-                    <button id="start-button">Iniciar Robô</button>
-                    <button id="save-config-button">Salvar Config</button>
-                </div>
+  <h2>OBR Line Follower</h2>
 
-                <div class="control-item">
-                    <label for="color-to-calibrate">Calibrar Cor (clique no vídeo):</label>
-                    <select id="color-to-calibrate">
-                        <option value="black">Preto (Linha)</option>
-                        <option value="white">Branco (Fundo)</option>
-                        <option value="green">Verde (Área)</option>
-                    </select>
-                </div>
+  <div class="row">
+    <button id="start">Start Robot</button>
+    <button id="stop">Stop Robot</button>
+    <button data-mode="normal" class="mode">Normal</button>
+    <button data-mode="mask" class="mode">Mask</button>
+    <button data-mode="contours" class="mode">Contours</button>
+    <button data-mode="derivative" class="mode">Derivatives</button>
+    <span id="status">Status: —</span>
+    <span id="fps">FPS: —</span>
+    <span id="speeds">Speeds: —</span>
+  </div>
 
-                <div class="control-item">
-                    <label for="derivative-threshold">Derivative Threshold</label>
-                    <input id="derivative-threshold" type="number" value="{{ config['line_detection']['derivative_threshold'] }}">
-                </div>
-                <div class="control-item">
-                    <label for="min-width-ratio">Min Line Width Ratio</label>
-                    <input id="min-width-ratio" type="number" step="0.01" value="{{ config['line_detection']['min_line_width_ratio'] }}">
-                </div>
-                <div class="control-item">
-                    <label for="max-width-ratio">Max Line Width Ratio</label>
-                    <input id="max-width-ratio" type="number" step="0.01" value="{{ config['line_detection']['max_line_width_ratio'] }}">
-                </div>
-                <div class="control-item">
-                    <label for="contrast-threshold">Contrast Threshold</label>
-                    <input id="contrast-threshold" type="number" value="{{ config['line_detection']['contrast_threshold'] }}">
-                </div>
-
-                <h2>Console de Logs</h2>
-                <div id="log-console"></div>
-            </div>
-        </div>
+  <div class="row">
+    <img id="video" src="/stream" width="640" height="480" alt="stream">
+    <div>
+      <p>Clique no vídeo para calibrar uma cor:</p>
+      <select id="color">
+        <option value="black">Preto (linha)</option>
+        <option value="white">Branco (fundo)</option>
+        <option value="green">Verde (marcador)</option>
+        <option value="red">Vermelho (chegada)</option>
+      </select>
+      <p><small>Clique na imagem para enviar as coordenadas originais 640×480.</small></p>
     </div>
+  </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
-    <script>
-    document.addEventListener('DOMContentLoaded', () => {
-        // Conecta ao servidor WebSocket
-        const socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
+  <h3>Log</h3>
+  <pre id="log"></pre>
 
-        socket.on('connect', () => {
-            console.log('Conectado ao servidor WebSocket!');
-        });
+  <script>
+    const socket = io({ transports: ["websocket"] });
 
-        // Função unificada para enviar comandos via WebSocket
-        function sendCommand(command, payload = {}) {
-            console.log(`Enviando comando: ${command}`, payload);
-            socket.emit('command', { command, payload });
-        }
+    const logEl = document.getElementById("log");
+    function addLog(t){ logEl.textContent += t + "\n"; logEl.scrollTop = logEl.scrollHeight; }
 
-        // Listeners para os botões
-        const startButton = document.getElementById('start-button');
-        const saveConfigButton = document.getElementById('save-config-button');
-        const videoStream = document.getElementById('video-stream');
-        const viewNormal = document.getElementById('view-normal');
-        const viewMask = document.getElementById('view-mask');
-        const viewContours = document.getElementById('view-contours');
-        const viewDerivative = document.getElementById('view-derivative');
-        const logConsole = document.getElementById('log-console');
-        const colorToCalibrate = document.getElementById('color-to-calibrate');
-        const derivativeInput = document.getElementById('derivative-threshold');
-        const minWidthInput = document.getElementById('min-width-ratio');
-        const maxWidthInput = document.getElementById('max-width-ratio');
-        const contrastInput = document.getElementById('contrast-threshold');
+    socket.on("connect", () => addLog("Conectado ao Socket.IO."));
+    socket.on("disconnect", () => addLog("Socket desconectado."));
 
-        if (startButton) {
-            startButton.addEventListener('click', () => sendCommand('start_robot'));
-        }
-        if (saveConfigButton) {
-            saveConfigButton.addEventListener('click', () => {
-                const payload = {
-                    line_detection: {
-                        derivative_threshold: parseFloat(derivativeInput.value),
-                        min_line_width_ratio: parseFloat(minWidthInput.value),
-                        max_line_width_ratio: parseFloat(maxWidthInput.value),
-                        contrast_threshold: parseFloat(contrastInput.value)
-                    }
-                };
-                sendCommand('save_config', payload);
-            });
-        }
-        if (viewNormal) {
-            viewNormal.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'normal' }));
-        }
-        if (viewMask) {
-            viewMask.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'mask' }));
-        }
-        if (viewContours) {
-            viewContours.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'contours' }));
-        }
-        if (viewDerivative) {
-            viewDerivative.addEventListener('click', () => sendCommand('set_view_mode', { mode: 'derivative' }));
-        }
-
-        // Listener para calibração por clique no vídeo
-        if (videoStream) {
-            videoStream.addEventListener('click', function(e) {
-                const rect = videoStream.getBoundingClientRect();
-
-                // As dimensões originais da imagem do robô
-                const originalWidth = 640;
-                const originalHeight = 480;
-
-                // As dimensões atuais do elemento <img> no navegador
-                const displayWidth = rect.width;
-                const displayHeight = rect.height;
-
-                // Calcula a posição do clique como uma proporção do tamanho exibido
-                const x_ratio = (e.clientX - rect.left) / displayWidth;
-                const y_ratio = (e.clientY - rect.top) / displayHeight;
-
-                // Dimensiona a proporção para as dimensões originais da imagem
-                const x = Math.round(x_ratio * originalWidth);
-                const y = Math.round(y_ratio * originalHeight);
-
-                const color = colorToCalibrate.value;
-                sendCommand('calibrate_pixel', { x, y, color });
-            });
-        }
-
-        // Listener para receber logs do servidor
-        socket.on('log_message', (msg) => {
-            if (logConsole && msg.data) {
-                logConsole.innerHTML += msg.data + '<br>';
-                logConsole.scrollTop = logConsole.scrollHeight; // Auto-scroll
-            }
-        });
-
+    socket.on("log_message", (m) => addLog(m.text || JSON.stringify(m)));
+    socket.on("status", (s) => {
+      document.getElementById("status").textContent = "Status: " + (s.status ?? "—");
+      document.getElementById("fps").textContent = "FPS: " + (s.fps ?? "—");
+      const sp = s.speeds || {};
+      document.getElementById("speeds").textContent = `Speeds: L=${sp.left ?? "—"} R=${sp.right ?? "—"}`;
     });
-    </script>
+
+    // Poll leve para atualizar status (caso o servidor não esteja emitindo status push)
+    setInterval(async () => {
+      try {
+        const res = await fetch("/state");
+        const s = await res.json();
+        document.getElementById("status").textContent = "Status: " + (s.status ?? "—");
+        document.getElementById("fps").textContent = "FPS: " + (s.fps ?? "—");
+        const sp = s.speeds || {};
+        document.getElementById("speeds").textContent = `Speeds: L=${sp.left ?? "—"} R=${sp.right ?? "—"}`;
+      } catch(e){}
+    }, 1000);
+
+    // Botões
+    document.getElementById("start").onclick = () => {
+      socket.emit("command", { name: "start_robot" });
+    };
+    document.getElementById("stop").onclick = () => {
+      socket.emit("command", { name: "stop_robot" });
+    };
+    for (const b of document.querySelectorAll(".mode")) {
+      b.onclick = () => socket.emit("command", { name: "set_view_mode", data: { mode: b.dataset.mode } });
+    }
+
+    // Calibração por clique
+    const img = document.getElementById("video");
+    img.addEventListener("click", ev => {
+      // Coordenadas no elemento
+      const rect = img.getBoundingClientRect();
+      const rx = (ev.clientX - rect.left) / rect.width;
+      const ry = (ev.clientY - rect.top) / rect.height;
+      // Converte para 640x480 originais
+      const x = Math.round(rx * 640);
+      const y = Math.round(ry * 480);
+      const color = document.getElementById("color").value;
+      socket.emit("command", { name: "calibrate_pixel", data: { x, y, color }});
+      addLog(`calibrate_pixel: (${x},${y}) color=${color}`);
+    });
+  </script>
 </body>
 </html>
