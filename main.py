@@ -1,168 +1,222 @@
 import cv2
-import threading
 import time
+import threading
+from picamera2 import Picamera2
+import RPi.GPIO as GPIO
 import numpy as np
-
-# Import our custom modules.
-# vision.py contains the translated C++ vision logic.
-# hardware_control.py manages the motors and GPIO.
-# web_stream.py provides the Flask web server and shared state.
-from vision import Vision
+from collections import deque
 from hardware_control import HardwareControl
-from web_stream import SHARED_STATE, run_stream, log
+from vision import Vision
+import advanced_vision as adv_vision
+from web_stream import SHARED_STATE, log, run_stream
 
-def main_control_loop():
-    """
-    The main loop for robot control, vision processing, and state updates.
-    This function orchestrates the different modules.
-    """
+class Robot:
+    def __init__(self, log_function):
+        self.log = log_function
+        self.picam2 = Picamera2()
+        self.picam2.configure(self.picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
+        self.picam2.start()
+        time.sleep(1)
 
-    # --- Initialization ---
-    log("Main control loop started. Initializing components.")
+        self.hardware = HardwareControl(SHARED_STATE['config'])
+        self.vision = Vision(SHARED_STATE['config'], self.log)
+        adv_vision.update_config(SHARED_STATE['config'].get('line_detection', {}))
 
-    # On a real Raspberry Pi, the camera would be initialized with:
-    # cap = cv2.VideoCapture(0)
-    # For development without a camera, we create a black image.
-    use_real_camera = False
-    if use_real_camera:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            log("Error: Cannot open camera.")
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-    else:
-        log("Running without a camera. Using a dummy black frame.")
+        self.state = "WAITING"
+        # State for advanced line follower
+        self.line_points = deque(maxlen=20)
+        self.last_line_angle = -90.0  # Start by looking straight up (-90 deg)
+        self.planned_direction = None
 
-    # Initialize our custom modules
-    vision = Vision()
-    # The hardware_control class needs the config, which is loaded by web_stream
-    hardware = HardwareControl(SHARED_STATE['config'])
+    def update_stream_data(self, frame, mask=None, path_history=None, speeds=None, status_data=None, derivative_scan=None):
+        with SHARED_STATE['stream_lock']:
+            s_data = SHARED_STATE['stream_data']
+            s_data['last_frame'] = frame.copy()
+            # Only update other data if it's provided, making the function more robust
+            if mask is not None:
+                s_data['last_mask'] = mask.copy()
+            if path_history is not None:
+                s_data['path_history'] = list(path_history)
+            if speeds is not None:
+                s_data['motor_speeds'] = dict(speeds)
+            if status_data is not None:
+                s_data['status_data'] = dict(status_data)
+            if derivative_scan is not None:
+                s_data['derivative_scan'] = derivative_scan
 
-    # These variables are from the C++ main function and are used to control the scan logic.
-    # In a full implementation, these would be managed via the web UI.
-    first_scanpoint = (160, 220)  # Initial scan height from scan_height_reg
-    first_angle = 0
-    scan_radius1_reg = 55
-    scan_radius2_reg = 18
-    look_angle_reg = 180
-    look_width_reg = 160
-    base_speed = 30 # Base motor speed
+    def run(self):
+        try:
+            while True:
+                try:
+                    frame_4chan = self.picam2.capture_array()
+                    frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
+                    # A câmera está invertida; girar 180 graus antes do processamento
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    adv_vision.update_config(SHARED_STATE['config']['line_detection'])
 
-    log("Initialization complete. Waiting for start command from web interface...")
-    SHARED_STATE['start_event'].wait() # Pauses until 'start' is clicked in the web UI
-    log("Start command received. Beginning main processing loop.")
+                    cal_req = SHARED_STATE.get('calibration_request')
+                    if cal_req:
+                        self.vision.calibrate_by_click(frame, cal_req['x'], cal_req['y'], cal_req['color'])
+                        SHARED_STATE['calibration_request'] = None
 
-    try:
-        while True:
-            # --- 1. CAPTURE FRAME ---
-            if use_real_camera:
-                ret, frame = cap.read()
-                if not ret:
-                    log("Error: Can't receive frame (stream end?). Exiting ...")
-                    break
-            else:
-                # Create a dummy frame for testing
-                frame = np.zeros((240, 320, 3), dtype=np.uint8)
-                # We can draw a fake line for testing the vision code
-                cv2.line(frame, (20, 0), (250, 240), (255, 255, 255), 10)
+                    path_history = []
+                    status_data = {"fsm_state": self.state}
+                    mask = np.zeros((480, 640), dtype=np.uint8)
+                    derivative_data = None
+
+                    if self.state == "WAITING":
+                        if SHARED_STATE['start_event'].is_set():
+                            self.log("Comando da web recebido, iniciando.")
+                            SHARED_STATE['start_event'].clear()
+                            self.state = "FOLLOWING_LINE"
+                        elif not GPIO.input(self.hardware.START_BUTTON):
+                            self.log("Botão físico pressionado, iniciando.")
+                            time.sleep(0.5)
+                            self.state = "FOLLOWING_LINE"
+
+                    elif self.state == "FOLLOWING_LINE":
+                        # --- Advanced Line Detection Sequence ---
+                        scan_points = []
+                        last_scan_center = None
+
+                        # 1. First scan (scanline) to find the line near the robot
+                        scan_y = frame.shape[0] - 60
+                        scan_center_0 = (frame.shape[1] // 2, scan_y)
+                        scan_radius_0 = frame.shape[1] // 2 # Scan the whole width
+                        scandata, start_x = adv_vision.scanline(frame_gray, scan_center_0, scan_radius_0)
+                        scan_details = {'center_point': scan_center_0, 'radius': scan_radius_0}
+                        p0, deriv0 = adv_vision.find_line_from_scan(
+                            scandata, start_x, 'line', scan_details, min_line_width=20)
+
+                        if p0:
+                            scan_points.append(p0)
+                            last_scan_center = p0
+                            derivative_data = deriv0 # Save first derivative for visualization
+
+                            # 2. Subsequent scans (scancircle) to predict the path
+                            scan_radius = 30
+                            look_width = 180
+                            current_look_angle = self.last_line_angle
+                            max_scans = 50
+                            scan_count = 0
+
+                            while last_scan_center and scan_count < max_scans:
+                                scandata, angles = adv_vision.scancircle(
+                                    frame_gray,
+                                    last_scan_center,
+                                    scan_radius,
+                                    current_look_angle,
+                                    look_width,
+                                )
+                                scan_details = {
+                                    'center_point': last_scan_center,
+                                    'radius': scan_radius,
+                                }
+                                p_next, deriv_next = adv_vision.find_line_from_scan(
+                                    scandata,
+                                    angles,
+                                    'circle',
+                                    scan_details,
+                                    min_line_width=20,
+                                )
+
+                                if p_next:
+                                    current_look_angle = adv_vision.line_angle_from_points(last_scan_center, p_next)
+                                    scan_points.append(p_next)
+                                    last_scan_center = p_next
+                                    # Stop if the line leaves the frame
+                                    if (
+                                        p_next[1] <= 5
+                                        or p_next[0] <= 5
+                                        or p_next[0] >= frame.shape[1] - 5
+                                    ):
+                                        break
+                                else:
+                                    break
+
+                                scan_count += 1
+
+                        # 3. Update state and calculate motor error
+                        if len(scan_points) > 1:
+                            self.line_points.extendleft(scan_points)
+                            self.last_line_angle = adv_vision.line_angle_from_points(scan_points[0], scan_points[-1])
+
+                            # Use a point further down the path for the final error sent to the controller
+                            look_ahead_point_index = min(len(scan_points) - 1, 2)
+                            error_final = scan_points[look_ahead_point_index][0] - self.vision.CENTER_X
+
+                            base_speed = 50
+                            self.hardware.set_motor_speed(base_speed, error_final)
+
+                            path_history = scan_points
+                            status_data.update({"error": error_final, "angle": self.last_line_angle})
+                        else:
+                            self.hardware.stop()
+                            status_data.update({"error": "Line Lost"})
+                        # Basic detection for interseções e marcadores verdes
+                        _, red, _, intersection, _, _, mask_black, _, green_dir, green_points = self.vision.detect_line_features(frame)
+
+                        # Desenha marcadores verdes detectados
+                        for gx, gy in green_points:
+                            cv2.circle(frame, (gx, gy), 10, (0, 255, 0), 2)
+
+                        if intersection and green_dir:
+                            if green_dir == "uturn":
+                                self.planned_direction = green_dir
+                                self.state = "TURNING_AROUND"
+                            else:
+                                self.planned_direction = green_dir
+                                if green_dir == "left":
+                                    self.last_line_angle = -135
+                                elif green_dir == "right":
+                                    self.last_line_angle = -45
+                                else:
+                                    self.last_line_angle = -90
+
+                        if red:
+                            self.state = "FINISHING"
+
+                        mask = mask_black
+                        status_data.update({"green": green_dir, "planned_path": self.planned_direction})
+
+                    # Estados adicionais (interseção e obstáculos) removidos nesta versão focada no seguidor de linha
+
+                    elif self.state == "TURNING_AROUND":
+                        self.log("Dois marcadores verdes detectados. Executando retorno de 180°.")
+                        # Gira no lugar aplicando velocidades opostas por um curto período
+                        self.hardware.set_motor_speed(0, 100)
+                        time.sleep(1)
+                        self.hardware.stop()
+                        # Após virar, o robô olhará para trás (90°)
+                        self.last_line_angle = 90
+                        self.state = "FOLLOWING_LINE"
+
+                    elif self.state == "FINISHING":
+                        self.log("Linha de chegada detectada. Finalizando.")
+                        self.hardware.stop()
+                        time.sleep(5)
+                        break
+
+                    speeds = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
+                    self.update_stream_data(frame, mask, path_history, speeds, status_data, derivative_data)
+                    time.sleep(0.05)
+
+                except Exception as e:
+                    self.log(f"ERRO NO LAÇO PRINCIPAL: {e}")
+                    self.log("O robô irá parar por segurança. Reinicie o programa.")
+                    self.hardware.stop()
+                    # We could break here, but sleeping allows the stream to continue
+                    time.sleep(1)
 
 
-            # --- 2. VISION PROCESSING (from C++ main loop) ---
-
-            # Create a copy of the frame for drawing overlays
-            display_frame = frame.copy()
-
-            # A. Object Tracking (Green Dot)
-            # This part can be enabled/disabled or configured via the web UI in a full version.
-            hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            hsv_config = SHARED_STATE['config']['hsv_black'] # Using black line config for now
-            thresh_image = cv2.inRange(hsv_image, hsv_config['lower'], hsv_config['upper'])
-            erode_element = cv2.getStructuringElement(cv2.MORPH_RECT, (4, 4))
-            eroded_image = cv2.erode(thresh_image, erode_element)
-
-            object_found, green_x, green_y = vision.track_object(eroded_image)
-            if object_found:
-                vision.draw_object(display_frame, green_x, green_y)
-
-            # B. Line Following Scans
-            gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # This sequence of scans is a direct translation of the logic in the C++ main function.
-            # It creates a "snake" of scan points that follow the line.
-
-            # Zero Scan: A horizontal line scan to find the line initially.
-            vision.scanline(gray_image, (first_scanpoint[0], 220), scan_radius1_reg)
-            first_scanpoint, _ = vision.find_line(scan_mode=0)
-
-            # First Scan: A circular scan based on the first found point.
-            vision.scancircle(gray_image, vision.line_points[0], scan_radius2_reg, first_angle, look_width_reg)
-            vision.find_line(scan_mode=1)
-            first_angle = vision.line_angle()
-            first_angle = np.clip(first_angle, -45, 45) # Clamp angle as in C++
-
-            # Subsequent scans to refine the path
-            vision.scancircle(gray_image, vision.line_points[0], scan_radius2_reg, first_angle, 180)
-            vision.find_line(scan_mode=1)
-            vision.scancircle(gray_image, vision.line_points[0], scan_radius2_reg, vision.line_angle(), 180)
-            vision.find_line(scan_mode=1)
-            vision.scancircle(gray_image, vision.line_points[0], scan_radius2_reg, vision.line_angle(), 180)
-            _, derivative_data = vision.find_line(scan_mode=1)
-
-
-            # --- 3. CONTROL ---
-
-            # P_Error in C++ is the horizontal offset of the first scan point from the center.
-            p_error = first_scanpoint[0] - (frame.shape[1] / 2)
-
-            # I_Error in C++ is the angle of the line. Our PID controller in hardware_control.py
-            # is more traditional and only needs the positional error (p_error).
-            i_error_angle = vision.line_angle()
-
-            # Send the error to the hardware controller to set motor speeds.
-            # The PID logic is handled within the HardwareControl class.
-            hardware.set_motor_speed(base_speed, p_error)
-
-
-            # --- 4. UPDATE WEB STREAM STATE ---
-
-            # This block updates the shared dictionary that the web server thread reads from.
-            with SHARED_STATE['stream_lock']:
-                # Draw the detected line path for visualization
-                for i in range(1, len(vision.line_points)):
-                    p1 = vision.line_points[i-1]
-                    p2 = vision.line_points[i]
-                    if p1 and p2:
-                        cv2.line(display_frame, p1, p2, (255, 0, 0), 2)
-                for point in vision.line_points:
-                    cv2.circle(display_frame, point, 5, (0, 0, 255), -1)
-
-                s_data = SHARED_STATE['stream_data']
-                s_data['last_frame'] = display_frame
-                s_data['last_mask'] = eroded_image
-                s_data['derivative_scan'] = derivative_data
-                s_data['status_data'] = {'P_Error': p_error, 'Angle': i_error_angle}
-                s_data['motor_speeds'] = {'left': hardware.last_left_speed, 'right': hardware.last_right_speed}
-
-            # A small delay to yield CPU time
-            time.sleep(0.01)
-
-    except KeyboardInterrupt:
-        log("Keyboard interrupt received. Shutting down.")
-    finally:
-        # Cleanup
-        log("Stopping hardware and cleaning up GPIO.")
-        if use_real_camera:
-            cap.release()
-        hardware.cleanup()
-
+        except KeyboardInterrupt:
+            self.hardware.cleanup()
 
 if __name__ == '__main__':
-    # Run the Flask web server in a separate thread.
-    # The 'daemon=True' ensures the thread will exit when the main program exits.
+    from web_stream import log
+    robot = Robot(log_function=log)
     stream_thread = threading.Thread(target=run_stream)
     stream_thread.daemon = True
     stream_thread.start()
-
-    # Run the main robot control loop in the main thread.
-    main_control_loop()
+    robot.run()
