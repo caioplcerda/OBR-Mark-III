@@ -1,6 +1,6 @@
 # main.py
-# Estilo RCJ 2014: núcleo de varreduras (scanline/scancircle/derivada) dentro do loop principal,
-# com controle de motores, detecção de verdes/vermelho, UI web opcional e Picamera2/USB.
+# Estilo RCJ 2014 com defensivas: scanline/scancircle/derivada no loop,
+# PID defaults, compat de set_motor_speed, UI web opcional e Picamera2/USB.
 
 import os
 import cv2
@@ -41,7 +41,10 @@ import rcj2014_port as rcj
 PICAMERA_AVAILABLE = False
 try:
     from picamera2 import Picamera2
-    from libcamera import Transform
+    try:
+        from libcamera import Transform
+    except Exception:
+        Transform = None
     PICAMERA_AVAILABLE = True
 except Exception:
     PICAMERA_AVAILABLE = False
@@ -71,10 +74,15 @@ class Camera:
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
-                cfg = self.picam.create_preview_configuration(
-                    main={"size": (self.width, self.height), "format": "RGB888"},
-                    transform=Transform(hflip=0, vflip=0),
-                )
+                if Transform is not None:
+                    cfg = self.picam.create_preview_configuration(
+                        main={"size": (self.width, self.height), "format": "RGB888"},
+                        transform=Transform(hflip=0, vflip=0),
+                    )
+                else:
+                    cfg = self.picam.create_preview_configuration(
+                        main={"size": (self.width, self.height), "format": "RGB888"}
+                    )
                 self.picam.configure(cfg)
                 self.picam.start()
                 log("Picamera2 iniciada.")
@@ -133,6 +141,9 @@ class Robot:
     CIRCLE_RADIUS = 22       # raio pequeno do scancircle (ponto local)
     LOOK_WIDTH_DEG = 180     # janela angular usada no look-ahead
 
+    # PID defaults (evita KeyError no HardwareControl.__init__)
+    PID_DEFAULTS = {"kp": 0.8, "ki": 0.0, "kd": 0.12, "sample_time": 0.02}
+
     def __init__(self):
         self.running = False
         self.thread = None
@@ -140,8 +151,10 @@ class Robot:
 
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
-        self.vision = Vision({}, log)              # (config, log_function)
-        self.hardware = HardwareControl({"pid": {}})  # <- precisa de dict com 'pid' já no __init__
+        self.vision = Vision({}, log)  # (config, log_function)
+
+        # IMPORTANTE: HardwareControl exige config com 'pid' completo no __init__
+        self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
         # Variáveis RCJ
         self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
@@ -172,7 +185,10 @@ class Robot:
         self.running = False
         self.state = "STOPPED"
         SHARED_STATE["status"] = "stopped"
-        self.hardware.stop()
+        try:
+            self.hardware.stop()
+        except Exception:
+            pass
         log("Parado.")
 
     def cleanup(self):
@@ -200,13 +216,16 @@ class Robot:
         log(f"Calibração ({color}) em ({x},{y}) -> {ok}")
         return ok
 
+    def _ensure_pid_defaults(self, cfg: dict):
+        cfg.setdefault("pid", {})
+        for k, v in self.PID_DEFAULTS.items():
+            cfg["pid"].setdefault(k, v)
+
     def save_config(self, new_cfg: dict):
         """Persiste parâmetros vindos da UI e propaga para Vision/Hardware (defensivo)."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
-
-            # **garante** a existência de 'pid' para o HardwareControl
-            SHARED_STATE["config"].setdefault("pid", {})
+            self._ensure_pid_defaults(SHARED_STATE["config"])
 
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
@@ -215,11 +234,11 @@ class Robot:
             if "vision" in SHARED_STATE["config"]:
                 self.vision.update_config(SHARED_STATE["config"]["vision"])
 
-            # Hardware (PID): como o HC leu self.config no __init__, mantemos sincronizado
+            # Hardware (PID)
             try:
                 if hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
+                    # mantém self.hardware.config sincronizado com SHARED_STATE["config"]
                     self.hardware.config.update(SHARED_STATE["config"])
-                # Reprocessa os parâmetros de PID, se método existir
                 if hasattr(self.hardware, "update_pid_from_config"):
                     self.hardware.update_pid_from_config()
             except Exception as e:
@@ -238,9 +257,7 @@ class Robot:
                 with open(self.cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
 
-                # **garante** a existência de 'pid'
-                cfg.setdefault("pid", {})
-
+                self._ensure_pid_defaults(cfg)
                 SHARED_STATE["config"] = cfg
 
                 if "vision" in cfg:
@@ -258,10 +275,24 @@ class Robot:
             except Exception as e:
                 log(f"Falha ao ler config.json: {e}")
 
+    # ====== Helpers de controle ======
+    def _drive(self, base_speed: float, error: float):
+        """
+        Compat: se hardware_control.set_motor_speed aceitar (base, erro), usa direto.
+        Se aceitar (left, right), converte.
+        """
+        try:
+            # Tentativa 1: assinatura (base, erro)
+            self.hardware.set_motor_speed(base_speed, error)
+        except TypeError:
+            # Tentativa 2: assinatura (left, right)
+            left = int(max(-100, min(100, base_speed - error)))
+            right = int(max(-100, min(100, base_speed + error)))
+            self.hardware.set_motor_speed(left, right)
+
     # ====== Lógica principal estilo RCJ ======
     def _push_point(self, p):
         self.line_points.appendleft(p)
-        # histórico opcional na UI
         try:
             SHARED_STATE["path_history"].append(p)
             if len(SHARED_STATE["path_history"]) > 400:
@@ -285,7 +316,7 @@ class Robot:
                 status_msg = "OK"
                 derivative_export = None
 
-                # ---------- (A) ZERO SCAN: linha horizontal na base ----------
+                # ---------- (A) ZERO SCAN ----------
                 scan0, x0 = rcj.scanline(
                     gray,
                     (self.first_scanpoint[0], self.ZERO_SCAN_Y),
@@ -299,10 +330,13 @@ class Robot:
                      "radius": self.ZERO_SCAN_RADIUS},
                     min_line_width=12,
                 )
-                derivative_export = deriv0  # útil para o modo "Derivatives" da UI
+                derivative_export = deriv0
 
                 if not p0:
-                    self.hardware.stop()
+                    try:
+                        self.hardware.stop()
+                    except Exception:
+                        pass
                     status_msg = "Linha perdida (zero scan)."
                     self._publish(frame, status_msg, derivative_export)
                     time.sleep(0.01)
@@ -311,7 +345,7 @@ class Robot:
                 self.first_scanpoint = p0
                 self._push_point(p0)
 
-                # ---------- (B) FIRST SCAN: círculo com look-ahead ----------
+                # ---------- (B) FIRST SCAN ----------
                 scan1, angs1 = rcj.scancircle(
                     gray,
                     self.line_points[0],
@@ -325,7 +359,10 @@ class Robot:
                     min_line_width=6,
                 )
                 if not p1:
-                    self.hardware.stop()
+                    try:
+                        self.hardware.stop()
+                    except Exception:
+                        pass
                     status_msg = "Linha perdida (first scan)."
                     self._publish(frame, status_msg, derivative_export)
                     time.sleep(0.01)
@@ -337,7 +374,7 @@ class Robot:
                     ang = rcj.line_angle_from_points(self.line_points[1], self.line_points[0])
                     self.first_angle_deg = max(-self.MAX_ANGLE, min(self.MAX_ANGLE, ang))
 
-                # ---------- (C) SECOND SCAN: refino com novo look-ahead ----------
+                # ---------- (C) SECOND SCAN ----------
                 scan2, angs2 = rcj.scancircle(
                     gray, self.line_points[0], self.CIRCLE_RADIUS, self.first_angle_deg, 180
                 )
@@ -346,14 +383,17 @@ class Robot:
                     {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
                 )
                 if not p2:
-                    self.hardware.stop()
+                    try:
+                        self.hardware.stop()
+                    except Exception:
+                        pass
                     status_msg = "Linha perdida (second scan)."
                     self._publish(frame, status_msg, derivative_export)
                     time.sleep(0.01)
                     continue
                 self._push_point(p2)
 
-                # ---------- (D) THIRD SCAN: mais um refino ----------
+                # ---------- (D) THIRD SCAN ----------
                 look2 = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
                 scan3, angs3 = rcj.scancircle(
                     gray, self.line_points[0], self.CIRCLE_RADIUS, look2, 180
@@ -363,22 +403,24 @@ class Robot:
                     {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
                 )
                 if not p3:
-                    self.hardware.stop()
+                    try:
+                        self.hardware.stop()
+                    except Exception:
+                        pass
                     status_msg = "Linha perdida (third scan)."
                     self._publish(frame, status_msg, derivative_export)
                     time.sleep(0.01)
                     continue
                 self._push_point(p3)
 
-                # ---------- (E) Controle: erro P (offset) + componente angular ----------
+                # ---------- (E) Controle ----------
                 P_err = self.first_scanpoint[0] - (self.WIDTH // 2)
                 I_err = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
                 err_comp = float(P_err) + self.MIX_ANGLE * float(I_err)
 
-                # manda para o hardware (o teu HardwareControl interpreta left/right com base no erro)
-                self.hardware.set_motor_speed(self.BASE_SPEED, err_comp)
+                self._drive(self.BASE_SPEED, err_comp)
 
-                # ---------- (F) Eventos: verdes e vermelho ----------
+                # ---------- (F) Eventos ----------
                 greens, green_dir, _mask_green = rcj.track_green_centroids(
                     frame,
                     {"lower": self.vision.LOWER_GREEN, "upper": self.vision.UPPER_GREEN},
@@ -388,15 +430,17 @@ class Robot:
 
                 if green_dir == "uturn":
                     log("Marcadores verdes dos dois lados: U-turn.")
-                    # giro curto (ajuste se quiser usar encoder para 180° exato)
-                    self.hardware.set_motor_speed(0, 120)
+                    self._drive(0, -120)  # gira
                     time.sleep(0.5)
 
                 if red_detected:
                     status_msg = "Chegada (vermelho) detectada."
-                    self.hardware.stop()
+                    try:
+                        self.hardware.stop()
+                    except Exception:
+                        pass
 
-                # ---------- (G) Publicação para UI ----------
+                # ---------- (G) Publicação ----------
                 self._publish(frame, status_msg, derivative_export,
                               extras={"green": green_dir, "greens": greens, "red": red_detected})
 
@@ -407,7 +451,10 @@ class Robot:
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
-            self.hardware.stop()
+            try:
+                self.hardware.stop()
+            except Exception:
+                pass
 
     def _publish(self, frame, status_msg, derivative_data, extras=None):
         left = getattr(self.hardware, "last_left_speed", 0)
