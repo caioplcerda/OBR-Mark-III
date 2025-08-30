@@ -140,8 +140,8 @@ class Robot:
 
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
-        self.vision = Vision({}, log)           # <- usa (config, log_function)
-        self.hardware = HardwareControl({}, log)  # <- usa (config, log_function)
+        self.vision = Vision({}, log)        # (config, log_function)
+        self.hardware = HardwareControl(log) # <- assinatura real: só log_function
 
         # Variáveis RCJ
         self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
@@ -201,16 +201,32 @@ class Robot:
         return ok
 
     def save_config(self, new_cfg: dict):
-        """Persiste parâmetros vindos da UI e propaga para Vision/Hardware."""
+        """Persiste parâmetros vindos da UI e propaga para Vision/Hardware (defensivo)."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
 
-            # Envia partes relevantes para os módulos
-            self.vision.update_config(SHARED_STATE["config"].get("vision", {}))
-            self.hardware.config = SHARED_STATE["config"]           # passa o dict completo
-            self.hardware.update_pid_from_config()                  # sem args
+            # Visão
+            if "vision" in SHARED_STATE["config"]:
+                self.vision.update_config(SHARED_STATE["config"]["vision"])
+
+            # Hardware (PID): tenta várias vias, sem quebrar se algo não existir
+            cfg_pid = SHARED_STATE["config"].get("pid", None)
+            try:
+                if cfg_pid is not None and hasattr(self.hardware, "set_pid_params"):
+                    self.hardware.set_pid_params(cfg_pid)              # caminho 1
+                elif hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
+                    self.hardware.config.setdefault("pid", {})
+                    if cfg_pid is not None:
+                        self.hardware.config["pid"].update(cfg_pid)     # caminho 2
+                    if hasattr(self.hardware, "update_pid_from_config"):
+                        self.hardware.update_pid_from_config()
+                elif hasattr(self.hardware, "update_pid_from_config"):
+                    # Sem acesso a self.hardware.config: apenas reprocessa interno
+                    self.hardware.update_pid_from_config()              # caminho 3
+            except Exception as e:
+                log(f"Aviso: falha ao propagar PID para HardwareControl: {e}")
 
             log("Config salva.")
             return True
@@ -219,16 +235,30 @@ class Robot:
             return False
 
     def _load_config_if_any(self):
-        """Carrega config.json (se existir) e propaga para Vision/Hardware."""
+        """Carrega config.json (se existir) e propaga para Vision/Hardware (defensivo)."""
         if os.path.exists(self.cfg_path):
             try:
                 with open(self.cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 SHARED_STATE["config"] = cfg
 
-                self.vision.update_config(cfg.get("vision", {}))
-                self.hardware.config = cfg                       # passa o dict completo
-                self.hardware.update_pid_from_config()           # sem args
+                if "vision" in cfg:
+                    self.vision.update_config(cfg["vision"])
+
+                cfg_pid = cfg.get("pid", None)
+                try:
+                    if cfg_pid is not None and hasattr(self.hardware, "set_pid_params"):
+                        self.hardware.set_pid_params(cfg_pid)
+                    elif hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
+                        self.hardware.config.setdefault("pid", {})
+                        if cfg_pid is not None:
+                            self.hardware.config["pid"].update(cfg_pid)
+                        if hasattr(self.hardware, "update_pid_from_config"):
+                            self.hardware.update_pid_from_config()
+                    elif hasattr(self.hardware, "update_pid_from_config"):
+                        self.hardware.update_pid_from_config()
+                except Exception as e:
+                    log(f"Aviso: falha ao aplicar PID do config.json: {e}")
 
                 log("Config carregada.")
             except Exception as e:
@@ -355,7 +385,7 @@ class Robot:
                 self.hardware.set_motor_speed(self.BASE_SPEED, err_comp)
 
                 # ---------- (F) Eventos: verdes e vermelho ----------
-                greens, green_dir, mask_green = rcj.track_green_centroids(
+                greens, green_dir, _mask_green = rcj.track_green_centroids(
                     frame,
                     {"lower": self.vision.LOWER_GREEN, "upper": self.vision.UPPER_GREEN},
                     area_min=self.vision.GREEN_THRESHOLD_AREA,
