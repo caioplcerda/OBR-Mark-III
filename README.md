@@ -16,7 +16,8 @@ O software é modular e foi desenvolvido em Python, dividido nos seguintes compo
 
 ### Navegação e Seguimento de Linha
 - **Controle PID com Encoders:** Controle preciso de velocidade e distância utilizando um controlador PID que leva em conta a leitura de encoders ópticos em cada roda.
-- **Visão Lateral e Look-Ahead:** A câmera é montada de lado (90 graus), permitindo uma visão mais ampla e distante da pista. O software corrige a rotação da imagem e usa uma projeção look-ahead para antecipar curvas.
+- **Visão com rotação e varreduras:** A câmera é montada invertida (180°); o software gira a imagem antes do processamento e utiliza varreduras lineares e circulares para prever a trajetória da linha.
+- **Algoritmo RCJ 2014 espelhado:** As varreduras e o cálculo de erro seguem fielmente a lógica do projeto original em C++, garantindo comportamento idêntico ao seguidor de linha da competição.
 - **Detecção de Desafios:** Lógica para identificar e transpor desafios como interseções e obstáculos.
 - **Suporte a linhas grossas:** A visão computacional reconhece pistas com até 20 mm de largura usando operações morfológicas e contornos.
 - **Marcadores verdes em interseções:** detecção de áreas verdes para orientar o robô sobre qual caminho seguir, realizando um retorno de 180° quando dois marcadores aparecem simultaneamente.
