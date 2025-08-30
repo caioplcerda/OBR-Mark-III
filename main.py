@@ -1,45 +1,43 @@
 # main.py
-# Orquestrador do robô seguidor de linha com integração ao RCJ 2014 (scanline/scancircle/derivada),
-# interface web (se disponível) e controle de hardware (motores/encoders/PID).
+# Estilo RCJ 2014: núcleo de varreduras (scanline/scancircle/derivada) dentro do loop principal,
+# com controle de motores, detecção de verdes/vermelho, UI web opcional e Picamera2/USB.
 
 import os
-import sys
 import cv2
 import json
 import time
 import threading
 from datetime import datetime
+from collections import deque
 
-# ===== Tentativa de integrar com o servidor web, se presente =====
+# ==== Integração opcional com servidor web ====
 WEB_AVAILABLE = False
 SHARED_STATE = {
     "config": {},
-    "last_frame": None,              # frame BGR mais recente
-    "mask": None,                    # opcional: publicar alguma máscara
-    "contours": [],                  # opcional
-    "path_history": [],              # lista de pontos (x,y)
+    "last_frame": None,
+    "mask": None,
+    "contours": [],
+    "path_history": [],
     "speeds": {"left": 0, "right": 0},
-    "derivative_scan": None,         # vetor 1D para o modo "Derivatives"
-    "view_mode": "normal",           # normal | mask | contours | derivative
+    "derivative_scan": None,
+    "view_mode": "normal",
     "status": "idle",
     "log": [],
 }
-
 try:
-    import web_stream  # precisa existir no mesmo diretório
+    import web_stream  # se existir no projeto
     if hasattr(web_stream, "SHARED_STATE"):
-        SHARED_STATE = web_stream.SHARED_STATE  # usa o compartilhado do servidor
+        SHARED_STATE = web_stream.SHARED_STATE
     WEB_AVAILABLE = True
 except Exception:
     WEB_AVAILABLE = False
 
-
-# ===== Dependências internas do projeto =====
+# ==== Dependências do projeto ====
 from hardware_control import HardwareControl
 from vision import Vision
-from line_follower import LineFollower
+import rcj2014_port as rcj
 
-# ===== Picamera2 (opcional) =====
+# ==== Picamera2 (opcional) ====
 PICAMERA_AVAILABLE = False
 try:
     from picamera2 import Picamera2
@@ -50,13 +48,11 @@ except Exception:
 
 
 def log(msg: str):
-    """Log simples que também alimenta o painel web (se houver)."""
     stamp = datetime.now().strftime("%H:%M:%S")
     line = f"[{stamp}] {msg}"
     print(line, flush=True)
     try:
         SHARED_STATE["log"].append(line)
-        # limita tamanho do log no painel
         if len(SHARED_STATE["log"]) > 300:
             SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
     except Exception:
@@ -64,7 +60,7 @@ def log(msg: str):
 
 
 class Camera:
-    """Abstração de câmera: usa Picamera2 se disponível; senão, fallback para OpenCV."""
+    """Abstrai Picamera2 (preferido) ou USB/OpenCV; rotaciona 180° por padrão para espelhar RCJ."""
     def __init__(self, width=640, height=480, rotate_180=True):
         self.width = width
         self.height = height
@@ -75,15 +71,15 @@ class Camera:
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
-                config = self.picam.create_preview_configuration(
+                cfg = self.picam.create_preview_configuration(
                     main={"size": (self.width, self.height), "format": "RGB888"},
-                    transform=Transform(hflip=0, vflip=0)
+                    transform=Transform(hflip=0, vflip=0),
                 )
-                self.picam.configure(config)
+                self.picam.configure(cfg)
                 self.picam.start()
                 log("Picamera2 iniciada.")
             except Exception as e:
-                log(f"Falha ao iniciar Picamera2: {e}. Usando OpenCV/USB.")
+                log(f"Falha Picamera2: {e}. Usando OpenCV/USB.")
                 self.picam = None
 
         if self.picam is None:
@@ -91,13 +87,12 @@ class Camera:
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             if not self.cap.isOpened():
-                raise RuntimeError("Não foi possível abrir nenhuma câmera.")
+                raise RuntimeError("Nenhuma câmera disponível.")
 
     def read(self):
         if self.picam is not None:
-            # Picamera2 retorna RGB; converte para BGR
-            frame = self.picam.capture_array()
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            rgb = self.picam.capture_array()
+            frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         else:
             ok, frame_bgr = self.cap.read()
             if not ok:
@@ -107,41 +102,61 @@ class Camera:
         return frame_bgr
 
     def release(self):
-        if self.picam is not None:
-            try:
+        try:
+            if self.picam is not None:
                 self.picam.stop()
-            except Exception:
-                pass
-        if self.cap is not None:
-            try:
+            if self.cap is not None:
                 self.cap.release()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 class Robot:
-    """Classe principal que integra câmera, visão, seguidor e hardware."""
+    """
+    Núcleo à la RCJ_2014.cpp:
+      - ZERO scan (linha horizontal na base)
+      - FIRST scan (círculo com look-ahead pelo ângulo estimado)
+      - SECOND/THIRD scan (refinos de look-ahead)
+      - erro composto = offset_x + k*ângulo
+      - decisões por verde (left/right/uturn/straight) e chegada (vermelho)
+    """
+    # ==== Constantes de "pilotagem" no estilo RCJ ====
+    WIDTH = 640
+    HEIGHT = 480
+
+    BASE_SPEED = 50          # velocidade base (ajuste conforme tua ponte H/motores)
+    MIX_ANGLE = 0.6          # ganho do termo angular no erro composto
+    MAX_ANGLE = 45.0         # clamp em graus
+
+    ZERO_SCAN_Y = 420        # linha baixa para "zero scan" (imagem 480p, já girada 180°)
+    ZERO_SCAN_RADIUS = 320   # metade da largura coberta no zero scan
+    CIRCLE_RADIUS = 22       # raio pequeno do scancircle (ponto local)
+    LOOK_WIDTH_DEG = 180     # janela angular usada no look-ahead
+
     def __init__(self):
         self.running = False
         self.thread = None
-        self.view_mode = "normal"  # controlado pela UI
         self.state = "IDLE"
 
         # Componentes
-        self.camera = Camera(width=640, height=480, rotate_180=True)
-        self.vision = Vision(log)
+        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
+        self.vision = Vision({}, log)           # <- CORRIGIDO: (config, log_function)
         self.hardware = HardwareControl(log)
-        self.follower = LineFollower(self.hardware, self.vision, SHARED_STATE, log)
 
-        # Config (carrega se existir)
+        # Variáveis RCJ
+        self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
+        self.first_angle_deg = 0.0
+        self.line_points = deque(maxlen=7)
+
+        # Configuração persistente
         self.cfg_path = "config.json"
         self._load_config_if_any()
 
-        # FPS medição
+        # Medição de FPS
         self._last_ts = time.time()
         self._frames = 0
 
-    # ------------- ciclo de vida -------------
+    # ===== Ciclo de vida =====
     def start(self):
         if self.running:
             log("Robô já está rodando.")
@@ -158,7 +173,7 @@ class Robot:
         self.state = "STOPPED"
         SHARED_STATE["status"] = "stopped"
         self.hardware.stop()
-        log("Loop principal parado.")
+        log("Parado.")
 
     def cleanup(self):
         self.running = False
@@ -166,52 +181,36 @@ class Robot:
             self.hardware.cleanup()
         except Exception:
             pass
-        try:
-            self.camera.release()
-        except Exception:
-            pass
+        self.camera.release()
         log("Recursos liberados.")
 
-    # ------------- utilidades -------------
+    # ===== Utilidades / UI =====
     def set_view_mode(self, mode: str):
-        self.view_mode = mode
         SHARED_STATE["view_mode"] = mode
         log(f"View mode -> {mode}")
 
     def calibrate_pixel(self, x, y, color: str):
-        """Recebe clique na imagem (coordenadas 640x480) e calibra HSV."""
-        try:
-            # Usa último frame disponível para amostrar o pixel
-            frame = SHARED_STATE.get("last_frame", None)
-            if frame is None:
-                log("Sem frame para calibrar.")
-                return False
-            # Garantir limites
-            x = max(0, min(frame.shape[1] - 1, int(x)))
-            y = max(0, min(frame.shape[0] - 1, int(y)))
-            ok = self.vision.calibrate_by_click(frame, x, y, color)
-            if ok:
-                log(f"Calibração por clique ({color}) aplicada em ({x},{y}).")
-            else:
-                log("Calibração por clique falhou (retorno falso).")
-            return ok
-        except Exception as e:
-            log(f"Erro em calibrate_pixel: {e}")
+        frame = SHARED_STATE.get("last_frame", None)
+        if frame is None:
+            log("Sem frame para calibrar.")
             return False
+        x = max(0, min(frame.shape[1] - 1, int(x)))
+        y = max(0, min(frame.shape[0] - 1, int(y)))
+        ok = self.vision.calibrate_by_click(frame, x, y, color)
+        log(f"Calibração ({color}) em ({x},{y}) -> {ok}")
+        return ok
 
     def save_config(self, new_cfg: dict):
-        """Persiste parâmetros vindos da UI (ex.: limites HSV, thresholds da detecção, PID etc.)."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
-            # Envia partes relevantes para os módulos
             self.vision.update_config(SHARED_STATE["config"].get("vision", {}))
             self.hardware.update_pid_from_config(SHARED_STATE["config"].get("pid", {}))
-            log("Configuração salva em config.json.")
+            log("Config salva.")
             return True
         except Exception as e:
-            log(f"Falha ao salvar config: {e}")
+            log(f"Falha save_config: {e}")
             return False
 
     def _load_config_if_any(self):
@@ -222,72 +221,193 @@ class Robot:
                 SHARED_STATE["config"] = cfg
                 self.vision.update_config(cfg.get("vision", {}))
                 self.hardware.update_pid_from_config(cfg.get("pid", {}))
-                log("Configuração carregada de config.json.")
+                log("Config carregada.")
             except Exception as e:
-                log(f"Falha ao carregar config.json: {e}")
+                log(f"Falha ao ler config.json: {e}")
 
-    # ------------- loop principal -------------
+    # ====== Lógica principal estilo RCJ ======
+    def _push_point(self, p):
+        self.line_points.appendleft(p)
+        # histórico opcional na UI
+        try:
+            SHARED_STATE["path_history"].append(p)
+            if len(SHARED_STATE["path_history"]) > 400:
+                SHARED_STATE["path_history"] = SHARED_STATE["path_history"][-400:]
+        except Exception:
+            pass
+
+    def _detect_red(self, frame_bgr):
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        m1 = cv2.inRange(hsv, self.vision.LOWER_RED1, self.vision.UPPER_RED1)
+        m2 = cv2.inRange(hsv, self.vision.LOWER_RED2, self.vision.UPPER_RED2)
+        mask_red = cv2.add(m1, m2)
+        return cv2.countNonZero(mask_red) > self.vision.GREEN_THRESHOLD_AREA
+
     def _loop(self):
         try:
             while self.running:
-                frame = self.camera.read()  # BGR (já rotacionado se preciso)
+                frame = self.camera.read()  # BGR (já rotacionado em Camera)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                # Executa uma etapa do seguidor
-                status_msg, status = self.follower.step(frame)
+                status_msg = "OK"
+                derivative_export = None
 
-                # Atualiza velocidades para UI, se o HardwareControl expõe
-                left = getattr(self.hardware, "last_left_speed", 0)
-                right = getattr(self.hardware, "last_right_speed", 0)
-                SHARED_STATE["speeds"] = {"left": left, "right": right}
+                # ---------- (A) ZERO SCAN: linha horizontal na base ----------
+                scan0, x0 = rcj.scanline(
+                    gray,
+                    (self.first_scanpoint[0], self.ZERO_SCAN_Y),
+                    self.ZERO_SCAN_RADIUS,
+                )
+                p0, deriv0 = rcj.find_line_from_scan(
+                    scan0,
+                    x0,
+                    "line",
+                    {"center_point": (self.first_scanpoint[0], self.ZERO_SCAN_Y),
+                     "radius": self.ZERO_SCAN_RADIUS},
+                    min_line_width=12,
+                )
+                derivative_export = deriv0  # útil para o modo "Derivatives" da UI
 
-                # Publica frame + telemetria para o painel
-                SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["derivative_scan"] = status.get("derivative_scan", None)
-                # Path/history opcional: se LineFollower preencher (use SS['path_history'] do lado dele)
-                # Máscaras e contornos podem ser publicados por Vision ou pelo LineFollower conforme desejado
+                if not p0:
+                    self.hardware.stop()
+                    status_msg = "Linha perdida (zero scan)."
+                    self._publish(frame, status_msg, derivative_export)
+                    time.sleep(0.01)
+                    continue
 
-                # Status textual
-                SHARED_STATE["status"] = status_msg
+                self.first_scanpoint = p0
+                self._push_point(p0)
 
-                # FPS log leve
-                self._frames += 1
-                now = time.time()
-                if now - self._last_ts >= 2.0:
-                    fps = self._frames / (now - self._last_ts)
-                    self._frames = 0
-                    self._last_ts = now
-                    SHARED_STATE["fps"] = round(fps, 1)
-                    # evita spam excessivo
-                    log(f"Status: {status_msg} | FPS ~ {fps:.1f} | Speeds L/R: {left}/{right}")
+                # ---------- (B) FIRST SCAN: círculo com look-ahead ----------
+                scan1, angs1 = rcj.scancircle(
+                    gray,
+                    self.line_points[0],
+                    self.CIRCLE_RADIUS,
+                    self.first_angle_deg,
+                    self.LOOK_WIDTH_DEG,
+                )
+                p1, _ = rcj.find_line_from_scan(
+                    scan1, angs1, "circle",
+                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS},
+                    min_line_width=6,
+                )
+                if not p1:
+                    self.hardware.stop()
+                    status_msg = "Linha perdida (first scan)."
+                    self._publish(frame, status_msg, derivative_export)
+                    time.sleep(0.01)
+                    continue
+                self._push_point(p1)
 
-                # Pequena folga de CPU
-                time.sleep(0.005)
+                # Atualiza ângulo inicial com clamp
+                if len(self.line_points) > 1:
+                    ang = rcj.line_angle_from_points(self.line_points[1], self.line_points[0])
+                    self.first_angle_deg = max(-self.MAX_ANGLE, min(self.MAX_ANGLE, ang))
+
+                # ---------- (C) SECOND SCAN: refino com novo look-ahead ----------
+                scan2, angs2 = rcj.scancircle(
+                    gray, self.line_points[0], self.CIRCLE_RADIUS, self.first_angle_deg, 180
+                )
+                p2, _ = rcj.find_line_from_scan(
+                    scan2, angs2, "circle",
+                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
+                )
+                if not p2:
+                    self.hardware.stop()
+                    status_msg = "Linha perdida (second scan)."
+                    self._publish(frame, status_msg, derivative_export)
+                    time.sleep(0.01)
+                    continue
+                self._push_point(p2)
+
+                # ---------- (D) THIRD SCAN: mais um refino ----------
+                look2 = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
+                scan3, angs3 = rcj.scancircle(
+                    gray, self.line_points[0], self.CIRCLE_RADIUS, look2, 180
+                )
+                p3, _ = rcj.find_line_from_scan(
+                    scan3, angs3, "circle",
+                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
+                )
+                if not p3:
+                    self.hardware.stop()
+                    status_msg = "Linha perdida (third scan)."
+                    self._publish(frame, status_msg, derivative_export)
+                    time.sleep(0.01)
+                    continue
+                self._push_point(p3)
+
+                # ---------- (E) Controle: erro P (offset) + componente angular ----------
+                P_err = self.first_scanpoint[0] - (self.WIDTH // 2)
+                I_err = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
+                err_comp = float(P_err) + self.MIX_ANGLE * float(I_err)
+
+                # manda para o hardware (o teu HardwareControl interpreta left/right com base no erro)
+                self.hardware.set_motor_speed(self.BASE_SPEED, err_comp)
+
+                # ---------- (F) Eventos: verdes e vermelho ----------
+                greens, green_dir, mask_green = rcj.track_green_centroids(
+                    frame,
+                    {"lower": self.vision.LOWER_GREEN, "upper": self.vision.UPPER_GREEN},
+                    area_min=self.vision.GREEN_THRESHOLD_AREA,
+                )
+                red_detected = self._detect_red(frame)
+
+                if green_dir == "uturn":
+                    log("Marcadores verdes dos dois lados: U-turn.")
+                    # giro curto (ajuste se quiser usar encoder para 180° exato)
+                    self.hardware.set_motor_speed(0, 120)
+                    time.sleep(0.5)
+
+                if red_detected:
+                    status_msg = "Chegada (vermelho) detectada."
+                    self.hardware.stop()
+
+                # ---------- (G) Publicação para UI ----------
+                self._publish(frame, status_msg, derivative_export,
+                              extras={"green": green_dir, "greens": greens, "red": red_detected})
+
+                time.sleep(0.005)  # folga CPU
 
         except KeyboardInterrupt:
-            log("Interrompido por teclado.")
+            log("Interrompido.")
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
             self.hardware.stop()
 
+    def _publish(self, frame, status_msg, derivative_data, extras=None):
+        left = getattr(self.hardware, "last_left_speed", 0)
+        right = getattr(self.hardware, "last_right_speed", 0)
+        SHARED_STATE["last_frame"] = frame
+        SHARED_STATE["speeds"] = {"left": left, "right": right}
+        SHARED_STATE["status"] = status_msg
+        SHARED_STATE["derivative_scan"] = (
+            derivative_data.tolist() if derivative_data is not None else None
+        )
+        # Atualiza FPS a cada ~2s
+        self._frames += 1
+        now = time.time()
+        if now - getattr(self, "_last_ts", now) >= 2.0:
+            fps = self._frames / (now - self._last_ts)
+            self._frames = 0
+            self._last_ts = now
+            SHARED_STATE["fps"] = round(fps, 1)
+            log(f"Status: {status_msg} | FPS ~ {fps:.1f} | L/R: {left}/{right}")
+        if extras:
+            for k, v in extras.items():
+                SHARED_STATE[k] = v
 
-# ===== Integração com o servidor web (se disponível) =====
+
+# ==== Integração com web_stream (se existir) ====
 def _wire_web(robot: Robot):
-    """
-    Faz o 'handshake' com web_stream, registrando callbacks de comandos.
-    Este código tenta usar funções/convencões comuns; ajuste se seu web_stream expõe nomes diferentes.
-    """
     if not WEB_AVAILABLE:
         return
-
-    # Se o web_stream tiver um registrador de robô, use-o.
-    # Caso contrário, registramos handlers diretamente no objeto socketio se existir.
     try:
         if hasattr(web_stream, "register_robot"):
             web_stream.register_robot(robot)
             log("Robô registrado no servidor web.")
         elif hasattr(web_stream, "socketio"):
-            # Fallback genérico: cria listeners básicos de comando
             sio = web_stream.socketio
 
             @sio.on("command")
@@ -309,8 +429,8 @@ def _wire_web(robot: Robot):
                         log(f"Comando desconhecido: {cmd}")
                 except Exception as e:
                     log(f"Erro no comando via socket: {e}")
-
-            log("Listeners de comando básicos conectados ao Socket.IO.")
+        else:
+            log("web_stream sem app/socketio/register_robot; seguindo headless+start manual.")
     except Exception as e:
         log(f"Falha ao integrar com web_stream: {e}")
 
@@ -319,33 +439,26 @@ def main():
     robot = Robot()
     _wire_web(robot)
 
-    if WEB_AVAILABLE:
-        # Sobe o servidor web na *main thread*; o loop do robô roda em thread separada quando 'start' for chamado.
+    if WEB_AVAILABLE and hasattr(web_stream, "app"):
         host = os.environ.get("HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", "5000"))
-        log(f"Servidor web online em http://{host}:{port}")
+        log(f"Servidor web em http://{host}:{port}")
         try:
-            # Preferir socketio.run se existir
-            if hasattr(web_stream, "socketio") and hasattr(web_stream, "app"):
+            if hasattr(web_stream, "socketio"):
                 web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
-            elif hasattr(web_stream, "app"):
-                web_stream.app.run(host=host, port=port)
             else:
-                log("web_stream não expõe 'app' nem 'socketio'; rodando headless.")
-                robot.start()
-                while True:
-                    time.sleep(1)
+                web_stream.app.run(host=host, port=port)
         except KeyboardInterrupt:
             pass
         finally:
             robot.cleanup()
     else:
-        # Sem web: roda direto o loop
-        log("Servidor web não encontrado; rodando em modo headless.")
+        # Sem web: inicia imediatamente
+        log("Rodando em modo headless (sem servidor web).")
         try:
             robot.start()
             while True:
-                time.sleep(1)
+                time.sleep(1.0)
         except KeyboardInterrupt:
             pass
         finally:
