@@ -27,7 +27,7 @@ def main():
     GPIO.setup(R_PWMB, GPIO.OUT)
 
     pwm_left = GPIO.PWM(L_PWMB, 100)
-    pwm_right = GPIO.PWM(R_PWMB, 100)
+    pwm_right = GPIO.PWM(R_PWMB, 0)
     pwm_left.start(0)
     pwm_right.start(0)
 
