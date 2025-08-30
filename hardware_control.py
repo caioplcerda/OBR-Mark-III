@@ -38,13 +38,16 @@ class PIDController:
 class HardwareControl:
     def __init__(self, config):
         self.config = config
-        # === Pinos para o Driver TB6612FNG ===
-        self.AIN1 = 17
-        self.AIN2 = 27
-        self.PWMA = 22
-        self.BIN1 = 23
-        self.BIN2 = 24
-        self.PWMB = 25
+        # === Pinos para os Drivers TB6612FNG (canal B de cada placa) ===
+        # Driver do motor esquerdo
+        self.L_BIN1 = 17
+        self.L_BIN2 = 27
+        self.L_PWMB = 22
+        # Driver do motor direito
+        self.R_BIN1 = 23
+        self.R_BIN2 = 24
+        self.R_PWMB = 25
+        # Pino de standby compartilhado
         self.STBY = 5
 
         # === Pino para o Botão de Início ===
@@ -66,10 +69,10 @@ class HardwareControl:
 
         GPIO.setmode(GPIO.BCM)
         # Configura pinos do motor
-        for pin in [self.AIN1, self.AIN2, self.BIN1, self.BIN2, self.STBY]:
+        for pin in [self.L_BIN1, self.L_BIN2, self.R_BIN1, self.R_BIN2, self.STBY]:
             GPIO.setup(pin, GPIO.OUT)
-        GPIO.setup(self.PWMA, GPIO.OUT)
-        GPIO.setup(self.PWMB, GPIO.OUT)
+        GPIO.setup(self.L_PWMB, GPIO.OUT)
+        GPIO.setup(self.R_PWMB, GPIO.OUT)
 
         # Configura pino do botão
         GPIO.setup(self.START_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -83,10 +86,10 @@ class HardwareControl:
         GPIO.add_event_detect(self.ENCODER_A_R, GPIO.RISING, callback=self.encoder_callback_r)
 
         # PWM para os motores
-        self.pwm_a = GPIO.PWM(self.PWMA, 100)
-        self.pwm_b = GPIO.PWM(self.PWMB, 100)
-        self.pwm_a.start(0)
-        self.pwm_b.start(0)
+        self.pwm_left = GPIO.PWM(self.L_PWMB, 100)
+        self.pwm_right = GPIO.PWM(self.R_PWMB, 100)
+        self.pwm_left.start(0)
+        self.pwm_right.start(0)
 
         # Ativa o driver
         GPIO.output(self.STBY, GPIO.HIGH)
@@ -115,28 +118,28 @@ class HardwareControl:
         self.last_left_speed = left_speed
         self.last_right_speed = right_speed
 
-        # Controle do Motor A (Esquerdo)
+        # Controle do Motor Esquerdo
         if left_speed > 0:
-            GPIO.output(self.AIN1, GPIO.HIGH)
-            GPIO.output(self.AIN2, GPIO.LOW)
+            GPIO.output(self.L_BIN1, GPIO.HIGH)
+            GPIO.output(self.L_BIN2, GPIO.LOW)
         else:
-            GPIO.output(self.AIN1, GPIO.LOW)
-            GPIO.output(self.AIN2, GPIO.HIGH)
-        self.pwm_a.ChangeDutyCycle(min(abs(left_speed), 100))
+            GPIO.output(self.L_BIN1, GPIO.LOW)
+            GPIO.output(self.L_BIN2, GPIO.HIGH)
+        self.pwm_left.ChangeDutyCycle(min(abs(left_speed), 100))
 
-        # Controle do Motor B (Direito)
+        # Controle do Motor Direito (invertido)
         if right_speed > 0:
-            GPIO.output(self.BIN1, GPIO.HIGH)
-            GPIO.output(self.BIN2, GPIO.LOW)
+            GPIO.output(self.R_BIN1, GPIO.LOW)
+            GPIO.output(self.R_BIN2, GPIO.HIGH)
         else:
-            GPIO.output(self.BIN1, GPIO.LOW)
-            GPIO.output(self.BIN2, GPIO.HIGH)
-        self.pwm_b.ChangeDutyCycle(min(abs(right_speed), 100))
+            GPIO.output(self.R_BIN1, GPIO.HIGH)
+            GPIO.output(self.R_BIN2, GPIO.LOW)
+        self.pwm_right.ChangeDutyCycle(min(abs(right_speed), 100))
 
     def stop(self):
         GPIO.output(self.STBY, GPIO.LOW)
-        self.pwm_a.ChangeDutyCycle(0)
-        self.pwm_b.ChangeDutyCycle(0)
+        self.pwm_left.ChangeDutyCycle(0)
+        self.pwm_right.ChangeDutyCycle(0)
 
     def cleanup(self):
         self.stop()
