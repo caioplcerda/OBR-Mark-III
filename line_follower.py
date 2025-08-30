@@ -53,7 +53,6 @@ class LineFollower:
             start_x,
             "line",
             {"center_point": (self.first_scanpoint[0], self.scan_height_reg), "radius": self.new_scan_radius1},
-            min_line_width=20,
         )
 
         if p0 is None:
@@ -78,7 +77,6 @@ class LineFollower:
             angles,
             "circle",
             {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-            min_line_width=20,
         )
         if p1 is None:
             self.hardware_control.stop()
@@ -101,7 +99,6 @@ class LineFollower:
             angles,
             "circle",
             {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-            min_line_width=20,
         )
         if p2 is None:
             self.hardware_control.stop()
@@ -123,7 +120,6 @@ class LineFollower:
             angles,
             "circle",
             {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-            min_line_width=20,
         )
         if p3 is None:
             self.hardware_control.stop()
@@ -147,7 +143,6 @@ class LineFollower:
             angles,
             "circle",
             {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-            min_line_width=20,
         )
         if p4 is None:
             self.hardware_control.stop()
