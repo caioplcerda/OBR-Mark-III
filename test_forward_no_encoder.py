@@ -35,15 +35,15 @@ def main():
     GPIO.output(STBY, GPIO.HIGH)
 
     try:
-        # Drive both motors forward at 50% duty cycle
-        GPIO.output(L_BIN1, GPIO.LOW)
-        GPIO.output(L_BIN2, GPIO.HIGH)
-        GPIO.output(R_BIN1, GPIO.HIGH)
-        GPIO.output(R_BIN2, GPIO.LOW)
-        pwm_left.ChangeDutyCycle(100)
-        pwm_right.ChangeDutyCycle(100)
+        # Drive left motor forward and right motor backward (inverted) at 50% duty cycle
+        GPIO.output(L_BIN1, GPIO.HIGH)
+        GPIO.output(L_BIN2, GPIO.LOW)
+        GPIO.output(R_BIN1, GPIO.LOW)
+        GPIO.output(R_BIN2, GPIO.HIGH)
+        pwm_left.ChangeDutyCycle(50)
+        pwm_right.ChangeDutyCycle(50)
 
-        print("Motors running forward. Press Ctrl+C to stop.")
+        print("Motors running with right motor inverted. Press Ctrl+C to stop.")
         # Keep running until interrupted
         while True:
             time.sleep(0.1)
