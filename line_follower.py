@@ -1,175 +1,142 @@
+# line_follower.py (UNIFICADO)
 import cv2
 import math
+from collections import deque
+
 from hardware_control import HardwareControl
 from vision import Vision
-from advanced_vision import (
-    scanline,
-    scancircle,
-    find_line_from_scan,
-)
+import rcj2014_port as rcj
 
 class LineFollower:
-    """ Classe para a lógica de seguimento de linha. """
-    def __init__(self, hardware_control, vision):
-        self.hardware_control = hardware_control
+    """
+    Seguidor de linha unificado:
+      - RCJ scans (scanline + 3x scancircle) com derivada -> ponto/ângulo
+      - Planejamento curto com look-ahead
+      - PID em cima de P (offset) e "I" ~ ângulo (feed-forward)
+      - Marcadores verdes (left/right/uturn) e linha de chegada (vermelho)
+      - Publica tudo para a interface web (derivada, máscara, histórico)
+    """
+    def __init__(self, hardware: HardwareControl, vision: Vision, shared_state, logger):
+        self.hw = hardware
         self.vision = vision
-        self.BASE_SPEED = 50
+        self.SS = shared_state
+        self.log = logger
 
-        # ==== Variáveis portadas do código RCJ ====
-        self.scan_height_reg = 220
-        self.scan_radius1_reg = 55
-        self.scan_radius2_reg = 18
-        self.look_angle_reg = 180
-        self.look_width_reg = 160
+        self.base_speed = 50
+        self.scan_h = 420          # y para o scanline (imagem 480p após giro de 180°)
+        self.radius_line = 320     # varrer largura inteira
+        self.radius_circle = 22
+        self.look_width_deg = 180
 
-        self.first_angle = 0
-        self.first_scanpoint = (160, self.scan_height_reg)
-        self.new_scan_radius1 = 140
+        self.first_angle_deg = 0
+        self.first_scanpoint = (self.vision.CENTER_X, self.scan_h)
+        self.line_points = deque(maxlen=7)
+        self.scanpoint = None
 
-        # Histórico dos últimos pontos detectados da linha
-        self.line_points = [self.first_scanpoint]
-        self.scanpoint = self.first_scanpoint
-
-        self.line_history = []
-        self.LINE_HISTORY_LENGTH = 20
-
-    def follow_line(self, frame):
-        """Executa a lógica de seguimento de linha para um único frame."""
-        # A câmera está montada de cabeça para baixo; gira 180 graus
-        frame = cv2.rotate(frame, cv2.ROTATE_180)
+    # ------------ loop principal por frame ------------
+    def step(self, frame_bgr):
+        # A tua câmera está invertida fisicamente: manter giros consistentes
+        frame = cv2.rotate(frame_bgr, cv2.ROTATE_180)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
 
-        # Lista temporária de pontos encontrados nesta iteração
-        frame_line_points = []
-
-        # === ZERO SCAN ===
-        scandata, start_x = scanline(
-            gray,
-            (self.first_scanpoint[0], self.scan_height_reg),
-            self.new_scan_radius1,
+        # (A) “ZERO SCAN” — linha perto do robô
+        scan0, x0 = rcj.scanline(gray, (self.first_scanpoint[0], self.scan_h), self.radius_line)
+        p0, deriv0 = rcj.find_line_from_scan(
+            scan0, x0, "line",
+            {"center_point": (self.first_scanpoint[0], self.scan_h), "radius": self.radius_line},
+            min_line_width=12,
         )
-        p0, _ = find_line_from_scan(
-            scandata,
-            start_x,
-            "line",
-            {"center_point": (self.first_scanpoint[0], self.scan_height_reg), "radius": self.new_scan_radius1},
-        )
-
-        if p0 is None:
-            self.hardware_control.stop()
-            return "Linha perdida. Parando.", self.line_history
+        if not p0:
+            self.hw.stop()
+            return "Linha perdida (zero scan).", {}
 
         self.first_scanpoint = p0
-        self._update_line_points(p0)
-        self.new_scan_radius1 = self.scan_radius1_reg
+        self._push_point(p0)
 
-        # === FIRST SCAN ===
-        scandata, angles = scancircle(
-            gray,
-            self.line_points[0],
-            self.scan_radius2_reg,
-            self.first_angle,
-            self.look_width_reg,
+        # (B) “FIRST SCAN” — círculo olhando com ângulo estimado
+        scan1, angs1 = rcj.scancircle(gray, self.line_points[0], self.radius_circle, self.first_angle_deg, self.look_width_deg)
+        p1, deriv1 = rcj.find_line_from_scan(
+            scan1, angs1, "circle",
+            {"center_point": self.line_points[0], "radius": self.radius_circle},
+            min_line_width=6,
         )
-        self.scanpoint = self.line_points[0]
-        p1, _ = find_line_from_scan(
-            scandata,
-            angles,
-            "circle",
-            {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
+        if not p1:
+            self.hw.stop()
+            return "Linha perdida (first scan).", {}
+        self._push_point(p1)
+
+        self.first_angle_deg = max(-45, min(45, rcj.line_angle_from_points(self.line_points[1], self.line_points[0])))
+
+        # (C) “SECOND/THIRD SCAN” — refina com novo look-ahead
+        scan2, angs2 = rcj.scancircle(gray, self.line_points[0], self.radius_circle, self.first_angle_deg, 180)
+        p2, deriv2 = rcj.find_line_from_scan(scan2, angs2, "circle",
+                                             {"center_point": self.line_points[0], "radius": self.radius_circle}, 6)
+        if not p2:
+            self.hw.stop()
+            return "Linha perdida (second scan).", {}
+        self._push_point(p2)
+
+        scan3, angs3 = rcj.scancircle(gray, self.line_points[0], self.radius_circle,
+                                      rcj.line_angle_from_points(self.line_points[1], self.line_points[0]), 180)
+        p3, deriv3 = rcj.find_line_from_scan(scan3, angs3, "circle",
+                                             {"center_point": self.line_points[0], "radius": self.radius_circle}, 6)
+        if not p3:
+            self.hw.stop()
+            return "Linha perdida (third scan).", {}
+        self._push_point(p3)
+
+        # (D) Erros de curso (P e “I” ~ ângulo)
+        P_err = self.first_scanpoint[0] - self.vision.CENTER_X
+        I_err = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
+
+        # (E) Ajuste de motores (PID interno do HardwareControl já usa o erro composto)
+        err_composto = P_err + 0.6 * I_err     # mistura leve de ângulo (feed-forward)
+        self.hw.set_motor_speed(self.base_speed, err_composto)
+
+        # (F) Eventos de pista (verde/vermelho) + máscara para UI
+        green_centroids, green_dir, mask_green = rcj.track_green_centroids(
+            frame,
+            {"lower": self.vision.LOWER_GREEN, "upper": self.vision.UPPER_GREEN},
+            area_min=self.vision.GREEN_THRESHOLD_AREA
         )
-        if p1 is None:
-            self.hardware_control.stop()
-            return "Linha perdida. Parando.", self.line_history
-        self._update_line_points(p1)
-        self.first_angle = self._lineangle()
-        self.first_angle = max(-45, min(45, self.first_angle))
+        red_detected = self._detect_red(frame)
 
-        # === SECOND SCAN ===
-        scandata, angles = scancircle(
-            gray,
-            self.line_points[0],
-            self.scan_radius2_reg,
-            self.first_angle,
-            180,
-        )
-        self.scanpoint = self.line_points[0]
-        p2, _ = find_line_from_scan(
-            scandata,
-            angles,
-            "circle",
-            {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-        )
-        if p2 is None:
-            self.hardware_control.stop()
-            return "Linha perdida. Parando.", self.line_history
-        self._update_line_points(p2)
+        # (G) Decisões simples: retorno/curvas por marcador
+        if green_dir == "uturn":
+            self.log("Marcadores verdes em ambos os lados: retorno 180°.")
+            self.hw.set_motor_speed(0, 120)
+            return "UTurn executado.", self._pack_status(P_err, I_err, mask_green, deriv0)
 
-        # === THIRD SCAN ===
-        next_angle = self._lineangle()
-        scandata, angles = scancircle(
-            gray,
-            self.line_points[0],
-            self.scan_radius2_reg,
-            next_angle,
-            180,
-        )
-        self.scanpoint = self.line_points[0]
-        p3, _ = find_line_from_scan(
-            scandata,
-            angles,
-            "circle",
-            {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-        )
-        if p3 is None:
-            self.hardware_control.stop()
-            return "Linha perdida. Parando.", self.line_history
-        self._update_line_points(p3)
+        # (H) Atualiza UI
+        status = self._pack_status(P_err, I_err, mask_green, deriv0,
+                                   extras={"green": green_dir, "greens": green_centroids, "red": red_detected})
 
-        P_Error = self.first_scanpoint[0] - self.vision.CENTER_X
+        if red_detected:
+            self.hw.stop()
+            return "Chegada detectada.", status
 
-        # === FOURTH SCAN ===
-        next_angle = self._lineangle()
-        scandata, angles = scancircle(
-            gray,
-            self.line_points[0],
-            self.scan_radius2_reg,
-            next_angle,
-            180,
-        )
-        self.scanpoint = self.line_points[0]
-        p4, _ = find_line_from_scan(
-            scandata,
-            angles,
-            "circle",
-            {"center_point": self.line_points[0], "radius": self.scan_radius2_reg},
-        )
-        if p4 is None:
-            self.hardware_control.stop()
-            return "Linha perdida. Parando.", self.line_history
-        self._update_line_points(p4)
-        I_Error = self._lineangle()
+        return "OK", status
 
-        # Controle dos motores (utiliza P_Error)
-        self.hardware_control.set_motor_speed(self.BASE_SPEED, P_Error)
-        status = f"P:{int(P_Error)} I:{int(I_Error)}"
+    # ------------ helpers ------------
+    def _push_point(self, p):
+        self.line_points.appendleft(p)
+        self.scanpoint = p
 
-        # Histórico de pontos para visualização
-        frame_line_points.extend(self.line_points[:4])
-        self.line_history.extend(frame_line_points)
-        if len(self.line_history) > self.LINE_HISTORY_LENGTH:
-            self.line_history = self.line_history[-self.LINE_HISTORY_LENGTH:]
+    def _detect_red(self, frame_bgr):
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        m1 = cv2.inRange(hsv, self.vision.LOWER_RED1, self.vision.UPPER_RED1)
+        m2 = cv2.inRange(hsv, self.vision.LOWER_RED2, self.vision.UPPER_RED2)
+        mask_red = cv2.add(m1, m2)
+        return cv2.countNonZero(mask_red) > self.vision.GREEN_THRESHOLD_AREA
 
-        return status, self.line_history
+    def _pack_status(self, P_err, I_err, mask, deriv_scan, extras=None):
+        # empacota para web_stream.SHARED_STATE
+        extras = extras or {}
+        return {
+            "P_err": float(P_err),
+            "I_err": float(I_err),
+            "derivative_scan": deriv_scan.tolist() if deriv_scan is not None else None,
+            **extras
+        }
 
-    def _update_line_points(self, point):
-        self.line_points.insert(0, point)
-        if len(self.line_points) > 7:
-            self.line_points = self.line_points[:7]
-
-    def _lineangle(self):
-        if not self.line_points or self.scanpoint is None:
-            return 0
-        lp = self.line_points[0]
-        sp = self.scanpoint
-        return math.degrees(math.atan2(lp[0] - sp[0], -(lp[1] - sp[1])))
