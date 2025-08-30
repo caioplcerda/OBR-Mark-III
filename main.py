@@ -140,8 +140,8 @@ class Robot:
 
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
-        self.vision = Vision({}, log)           # <- CORRIGIDO: (config, log_function)
-        self.hardware = HardwareControl(log)
+        self.vision = Vision({}, log)           # <- usa (config, log_function)
+        self.hardware = HardwareControl({}, log)  # <- usa (config, log_function)
 
         # Variáveis RCJ
         self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
@@ -201,12 +201,17 @@ class Robot:
         return ok
 
     def save_config(self, new_cfg: dict):
+        """Persiste parâmetros vindos da UI e propaga para Vision/Hardware."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
+
+            # Envia partes relevantes para os módulos
             self.vision.update_config(SHARED_STATE["config"].get("vision", {}))
-            self.hardware.update_pid_from_config(SHARED_STATE["config"].get("pid", {}))
+            self.hardware.config = SHARED_STATE["config"]           # passa o dict completo
+            self.hardware.update_pid_from_config()                  # sem args
+
             log("Config salva.")
             return True
         except Exception as e:
@@ -214,13 +219,17 @@ class Robot:
             return False
 
     def _load_config_if_any(self):
+        """Carrega config.json (se existir) e propaga para Vision/Hardware."""
         if os.path.exists(self.cfg_path):
             try:
                 with open(self.cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 SHARED_STATE["config"] = cfg
+
                 self.vision.update_config(cfg.get("vision", {}))
-                self.hardware.update_pid_from_config(cfg.get("pid", {}))
+                self.hardware.config = cfg                       # passa o dict completo
+                self.hardware.update_pid_from_config()           # sem args
+
                 log("Config carregada.")
             except Exception as e:
                 log(f"Falha ao ler config.json: {e}")
