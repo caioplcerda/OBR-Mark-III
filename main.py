@@ -140,8 +140,8 @@ class Robot:
 
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
-        self.vision = Vision({}, log)        # (config, log_function)
-        self.hardware = HardwareControl(log) # <- assinatura real: só log_function
+        self.vision = Vision({}, log)              # (config, log_function)
+        self.hardware = HardwareControl({"pid": {}})  # <- precisa de dict com 'pid' já no __init__
 
         # Variáveis RCJ
         self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
@@ -204,6 +204,10 @@ class Robot:
         """Persiste parâmetros vindos da UI e propaga para Vision/Hardware (defensivo)."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
+
+            # **garante** a existência de 'pid' para o HardwareControl
+            SHARED_STATE["config"].setdefault("pid", {})
+
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
 
@@ -211,20 +215,13 @@ class Robot:
             if "vision" in SHARED_STATE["config"]:
                 self.vision.update_config(SHARED_STATE["config"]["vision"])
 
-            # Hardware (PID): tenta várias vias, sem quebrar se algo não existir
-            cfg_pid = SHARED_STATE["config"].get("pid", None)
+            # Hardware (PID): como o HC leu self.config no __init__, mantemos sincronizado
             try:
-                if cfg_pid is not None and hasattr(self.hardware, "set_pid_params"):
-                    self.hardware.set_pid_params(cfg_pid)              # caminho 1
-                elif hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
-                    self.hardware.config.setdefault("pid", {})
-                    if cfg_pid is not None:
-                        self.hardware.config["pid"].update(cfg_pid)     # caminho 2
-                    if hasattr(self.hardware, "update_pid_from_config"):
-                        self.hardware.update_pid_from_config()
-                elif hasattr(self.hardware, "update_pid_from_config"):
-                    # Sem acesso a self.hardware.config: apenas reprocessa interno
-                    self.hardware.update_pid_from_config()              # caminho 3
+                if hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
+                    self.hardware.config.update(SHARED_STATE["config"])
+                # Reprocessa os parâmetros de PID, se método existir
+                if hasattr(self.hardware, "update_pid_from_config"):
+                    self.hardware.update_pid_from_config()
             except Exception as e:
                 log(f"Aviso: falha ao propagar PID para HardwareControl: {e}")
 
@@ -240,22 +237,19 @@ class Robot:
             try:
                 with open(self.cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
+
+                # **garante** a existência de 'pid'
+                cfg.setdefault("pid", {})
+
                 SHARED_STATE["config"] = cfg
 
                 if "vision" in cfg:
                     self.vision.update_config(cfg["vision"])
 
-                cfg_pid = cfg.get("pid", None)
                 try:
-                    if cfg_pid is not None and hasattr(self.hardware, "set_pid_params"):
-                        self.hardware.set_pid_params(cfg_pid)
-                    elif hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
-                        self.hardware.config.setdefault("pid", {})
-                        if cfg_pid is not None:
-                            self.hardware.config["pid"].update(cfg_pid)
-                        if hasattr(self.hardware, "update_pid_from_config"):
-                            self.hardware.update_pid_from_config()
-                    elif hasattr(self.hardware, "update_pid_from_config"):
+                    if hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
+                        self.hardware.config.update(cfg)
+                    if hasattr(self.hardware, "update_pid_from_config"):
                         self.hardware.update_pid_from_config()
                 except Exception as e:
                     log(f"Aviso: falha ao aplicar PID do config.json: {e}")
