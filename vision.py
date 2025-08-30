@@ -1,171 +1,197 @@
 import cv2
 import numpy as np
+import math
 
 class Vision:
-    """ Classe para todo o processamento de visão computacional. """
-    def __init__(self, config, log_function):
-        self.config = config
-        self.log = log_function
-        # === Limites de cor HSV para detecção ===
-        self.LOWER_GREEN = np.array([40, 50, 50])
-        self.UPPER_GREEN = np.array([85, 255, 255])
+    """
+    This class encapsulates the vision processing logic translated from the C++ file RJC_2014.cpp.
+    It handles line detection, object tracking, and calculating control errors.
+    """
+    def __init__(self):
+        # Constants translated from the C++ code
+        self.FRAME_WIDTH = 320
+        self.FRAME_HEIGHT = 240
+        self.PI = 3.14159265
 
-        # Limites para a cor Vermelha (duas faixas no HSV)
-        self.LOWER_RED1 = np.array([0, 70, 50])
-        self.UPPER_RED1 = np.array([10, 255, 255])
-        self.LOWER_RED2 = np.array([170, 70, 50])
-        self.UPPER_RED2 = np.array([180, 255, 255])
+        # State variables that were global in the C++ code
+        self.scandata = np.zeros(640, dtype=np.uint8)
+        self.scan_w = 0
+        self.scanpoint = (0, 0)
+        self.line_point = (0, 0)
+        self.line_points = [(0, 0)] * 7  # Equivalent to vector<Point> line_points(7)
+        self.scan_radius = 0
+        self.sc_strt = 0
+        self.sc_end = 0
+        self.last_arc_points = [] # To store points from scancircle
 
-        # === Parâmetros de Visão ===
-        self.FRAME_WIDTH = 640
-        self.CENTER_X = self.FRAME_WIDTH // 2
-        self.GREEN_THRESHOLD_AREA = 5000
-        self.OBSTACLE_MIN_AREA = 2000
-        self.OBSTACLE_REGION_Y = 100
-        self.INTERSECTION_WIDTH_THRESHOLD = int(self.FRAME_WIDTH * 0.8)
+    def test_inimage(self, image, x, y):
+        """Checks if a point (x, y) is within the image boundaries."""
+        rows, cols = image.shape[:2]
+        return 0 <= x < cols and 0 <= y < rows
 
-    def detect_line_features(self, frame):
-        """ Detecta características da linha, como centroide, interseções e obstáculos. """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    def draw_object(self, frame, x, y, color=(0, 255, 0)):
+        """Draws crosshairs on the frame at the specified (x, y) location."""
+        cv2.circle(frame, (x, y), 10, color, 1)
 
-        lower_black = self.config['hsv_black']['lower']
-        upper_black = self.config['hsv_black']['upper']
-        mask_black = cv2.inRange(hsv, lower_black, upper_black)
-        kernel = np.ones((5, 5), np.uint8)
-        mask_black = cv2.morphologyEx(mask_black, cv2.MORPH_CLOSE, kernel)
+        # Vertical line
+        if y - 15 > 0:
+            cv2.line(frame, (x, y), (x, y - 15), color, 1)
+        else:
+            cv2.line(frame, (x, y), (x, 0), color, 1)
+        if y + 15 < self.FRAME_HEIGHT:
+            cv2.line(frame, (x, y), (x, y + 15), color, 1)
+        else:
+            cv2.line(frame, (x, y), (x, self.FRAME_HEIGHT), color, 1)
 
-        mask_green = cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
+        # Horizontal line
+        if x - 15 > 0:
+            cv2.line(frame, (x, y), (x - 15, y), color, 1)
+        else:
+            cv2.line(frame, (x, y), (0, y), color, 1)
+        if x + 15 < self.FRAME_WIDTH:
+            cv2.line(frame, (x, y), (x + 15, y), color, 1)
+        else:
+            cv2.line(frame, (x, y), (self.FRAME_WIDTH, y), color, 1)
 
-        # Múltiplos ROIs (Regiões de Interesse) para uma análise mais robusta da linha
-        rois = {
-            "bottom": mask_black[210:240, :],
-            "middle": mask_black[160:200, :],
-            "top": mask_black[110:150, :]
-        }
+    def track_object(self, work_image):
+        """
+        Finds contours in the thresholded image and returns the center of the largest object.
+        Returns: (objectFound, x, y)
+        """
+        contours, _ = cv2.findContours(work_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        centroids = {}
-        widths = {}
-        for name, roi in rois.items():
-            contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                largest = max(contours, key=cv2.contourArea)
-                M = cv2.moments(largest)
-                if M["m00"] != 0:
-                    centroids[name] = int(M["m10"] / M["m00"])
-                    x, y, w, h = cv2.boundingRect(largest)
-                    widths[name] = w
-                else:
-                    centroids[name] = -1
-                    widths[name] = 0
+        object_found = False
+        x, y = 0, 0
+
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest_contour)
+
+            # C++ code had a threshold of 50 for the area
+            if area > 50:
+                moment = cv2.moments(largest_contour)
+                if moment['m00'] != 0:
+                    x = int(moment['m10'] / moment['m00'])
+                    y = int(moment['m01'] / moment['m00'])
+                    object_found = True
+
+        if not object_found:
+            x = self.FRAME_WIDTH // 2
+            y = 15 # Default value from C++
+
+        return object_found, x, y
+
+    def scanline(self, gray_image, mp, line_radius):
+        """
+        Scans a horizontal line of pixels from the gray_image.
+        Equivalent to the C++ scanline function.
+        """
+        self.scanpoint = mp
+        self.scan_radius = line_radius
+        self.scan_w = line_radius * 2
+        self.sc_strt = mp[0] - line_radius
+
+        row = gray_image[mp[1]]
+
+        scan_values = []
+        for i in range(self.scan_w):
+            current_col = self.sc_strt + i
+            if current_col < 0:
+                scan_values.append(row[0])
+            elif current_col >= gray_image.shape[1]:
+                scan_values.append(row[-1])
             else:
-                centroids[name] = -1
-                widths[name] = 0
+                scan_values.append(row[current_col])
 
-        cx = centroids["bottom"]  # O centroide principal é o mais próximo do robô
+        self.scandata = np.array(scan_values[:self.scan_w], dtype=np.uint8)
 
-        # Uma interseção é detectada se a linha ocupar grande parte do ROI
-        intersection = (
-            all(c != -1 for c in centroids.values())
-            and widths["bottom"] > self.INTERSECTION_WIDTH_THRESHOLD
+    def scancircle(self, gray_image, mp, radius, look_angle, width):
+        """
+        Scans pixels along a circular arc.
+        This is a simplified and more efficient version of the C++ scancircle function.
+        """
+        self.scanpoint = mp
+        self.scan_radius = radius
+
+        # --- Angle Conversion ---
+        # The C++ code seems to use a different angle convention.
+        # 180 degrees is up, 0 is down.
+        # This translates to OpenCV angles where 0 is right, 90 is up, 180 is left, 270 is down.
+        # C++ angle -> CV angle: cv_angle = 270 - cpp_angle
+        center_angle_cv = (270 - look_angle) % 360
+        angle_start = center_angle_cv - width / 2
+        angle_end = center_angle_cv + width / 2
+
+        # Get points for the arc using OpenCV
+        axes = (radius, radius)
+        # Using a delta of 1 degree for point generation
+        self.last_arc_points = cv2.ellipse2Poly(mp, axes, 0, angle_start, angle_end, 1)
+
+        scan_values = []
+        for p in self.last_arc_points:
+            x, y = p[0], p[1]
+            if self.test_inimage(gray_image, x, y):
+                scan_values.append(gray_image[y, x])
+            elif scan_values: # If out of bounds, use the last valid pixel
+                scan_values.append(scan_values[-1])
+            else: # If the first point is out of bounds
+                scan_values.append(0)
+
+        self.scandata = np.array(scan_values, dtype=np.uint8)
+        self.scan_w = len(self.scandata)
+
+    def find_line(self, scan_mode):
+        """
+        Finds the line center from the scandata array.
+        Calculates derivative, finds min/max peaks, and determines line position.
+        Returns the detected line point and the derivative for graphing.
+        """
+        if self.scan_w < 3:
+            return self.scanpoint, np.array([])
+
+        # Calculate derivative using convolution, which is more robust than the C++ version
+        derivative = np.convolve(self.scandata.astype(float), [-1, 0, 1], 'valid')
+
+        left_edge_index = np.argmax(derivative)
+        right_edge_index = np.argmin(derivative)
+
+        line_pos_index = (left_edge_index + right_edge_index) / 2.0
+
+        if scan_mode == 0:  # Linear scan
+            # Convert index back to image coordinates
+            # +1 to account for 'valid' convolution offset
+            x = int(line_pos_index + self.sc_strt + 1)
+            y = self.scanpoint[1]
+            self.line_point = (x, y)
+        elif scan_mode == 1:  # Circular scan
+            if self.scan_w > 0 and self.last_arc_points is not None and len(self.last_arc_points) > 0:
+                # Map the index from the derivative array back to the original arc points array
+                point_index = int(np.clip(line_pos_index + 1, 0, len(self.last_arc_points) - 1))
+                self.line_point = tuple(self.last_arc_points[point_index])
+            else:
+                self.line_point = self.scanpoint
+
+        # Clamp point to be within image bounds
+        self.line_point = (
+            np.clip(self.line_point[0], 0, self.FRAME_WIDTH - 1),
+            np.clip(self.line_point[1], 0, self.FRAME_HEIGHT - 1)
         )
 
-        # Detecção da linha de chegada (vermelho)
-        mask_red1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
-        mask_red2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
-        mask_red = cv2.add(mask_red1, mask_red2)
-        red_detected = cv2.countNonZero(mask_red) > self.GREEN_THRESHOLD_AREA
+        # Update history of line points
+        self.line_points.pop()
+        self.line_points.insert(0, self.line_point)
 
-        # --- Detecção de marcadores verdes e direção ---
-        green_direction = None
-        green_centroids = []
-        contours_green, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours_green:
-            area = cv2.contourArea(cnt)
-            if area > self.GREEN_THRESHOLD_AREA:
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    gx = int(M["m10"] / M["m00"])
-                    gy = int(M["m01"] / M["m00"])
-                    green_centroids.append((gx, gy))
+        return self.line_point, derivative
 
-        if green_centroids:
-            left = any(gx < self.CENTER_X - 50 for gx, _ in green_centroids)
-            right = any(gx > self.CENTER_X + 50 for gx, _ in green_centroids)
-            if left and right:
-                # Dois marcadores verdes, um de cada lado da linha -> retorno de 180°
-                green_direction = "uturn"
-            elif left:
-                green_direction = "left"
-            elif right:
-                green_direction = "right"
+    def line_angle(self):
+        """
+        Calculates the angle of the line relative to the scan center.
+        The C++ code uses atan2(dx, -dy).
+        """
+        p_x, p_y = self.line_points[0]
+        s_x, s_y = self.scanpoint
 
-        obstacle = self.detect_obstacle(mask_black)
-
-        # Calcula a curvatura usando regressão polinomial de 2º grau
-        curvature = 0
-        # Coordenadas Y aproximadas do centro de cada ROI
-        roi_y = {"bottom": 230, "middle": 190, "top": 150}
-        valid_points = [(roi_y[name], x) for name, x in centroids.items() if x != -1]
-        if len(valid_points) >= 3:
-            ys, xs = zip(*valid_points)
-            coeffs = np.polyfit(ys, xs, 2)
-            a, b, _ = coeffs
-            y_eval = ys[0]  # avalia a curvatura próximo ao robô
-            dxdy = 2 * a * y_eval + b
-            ddxdy = 2 * a
-            if abs(ddxdy) > 1e-6:
-                radius = ((1 + dxdy**2) ** 1.5) / abs(ddxdy)
-                curvature = 1 / (radius + 1)  # Normaliza para 0-1
-        elif len(valid_points) >= 2:
-            # Com poucos pontos, assume-se curva suave
-            curvature = 0
-
-        # Contagem de pixels na máscara preta
-        pixel_count = cv2.countNonZero(mask_black)
-
-        return (
-            cx,
-            red_detected,
-            obstacle,
-            intersection,
-            centroids,
-            curvature,
-            mask_black,
-            pixel_count,
-            green_direction,
-            green_centroids,
-        )
-
-    def calibrate_by_click(self, frame, x, y, color_name):
-        """ Calibra a faixa HSV de uma cor com base em um pixel clicado. """
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        pixel_hsv = hsv_frame[y, x]
-
-        h, s, v = int(pixel_hsv[0]), int(pixel_hsv[1]), int(pixel_hsv[2])
-
-        # Define uma tolerância para criar a faixa
-        h_tolerance = 10
-        s_tolerance = 40
-        v_tolerance = 40
-
-        lower_bound = np.array([max(0, h - h_tolerance), max(0, s - s_tolerance), max(0, v - v_tolerance)])
-        upper_bound = np.array([min(180, h + h_tolerance), min(255, s + s_tolerance), min(255, v + v_tolerance)])
-
-        # Atualiza a configuração global
-        if color_name == 'black':
-            self.config['hsv_black']['lower'] = lower_bound
-            self.config['hsv_black']['upper'] = upper_bound
-            self.log(f"Nova calibração para PRETO: {lower_bound} a {upper_bound}")
-        elif color_name == 'white':
-            self.config['hsv_white']['lower'] = lower_bound
-            self.config['hsv_white']['upper'] = upper_bound
-            self.log(f"Nova calibração para BRANCO: {lower_bound} a {upper_bound}")
-
-    def detect_obstacle(self, mask_black):
-        """ Detecta obstáculos na pista. """
-        obstacle_roi = mask_black[self.OBSTACLE_REGION_Y - 10:self.OBSTACLE_REGION_Y + 10, self.CENTER_X - 40:self.CENTER_X + 40]
-        contours, _ = cv2.findContours(obstacle_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            if cv2.contourArea(cnt) > self.OBSTACLE_MIN_AREA:
-                return True
-        return False
+        # In Python, math.atan2(y, x) is equivalent to C++ atan2(x, y).
+        # So we use atan2(-(p_y - s_y), p_x - s_x)
+        angle_rad = math.atan2(-(p_y - s_y), p_x - s_x)
+        return round(math.degrees(angle_rad))
