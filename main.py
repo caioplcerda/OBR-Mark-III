@@ -50,6 +50,8 @@ class Robot:
                 try:
                     frame_4chan = self.picam2.capture_array()
                     frame = cv2.cvtColor(frame_4chan, cv2.COLOR_RGBA2BGR)
+                    # A câmera está invertida; girar 180 graus antes do processamento
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     adv_vision.update_config(SHARED_STATE['config']['line_detection'])
 
