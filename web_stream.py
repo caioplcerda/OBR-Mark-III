@@ -48,7 +48,12 @@ def mjpeg_generator():
             time.sleep(0.05)
             continue
         try:
-            ok, jpg = cv2.imencode(".jpg", frame)
+            img = frame
+            # Se sua pipeline estiver produzindo RGB por algum motivo, convertemos pra BGR aqui:
+            if FORCE_RGB_INPUT:
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            # IMPORTANTE: cv2.imencode espera BGR
+            ok, jpg = cv2.imencode(".jpg", img)
             if not ok:
                 time.sleep(0.01)
                 continue
@@ -57,6 +62,7 @@ def mjpeg_generator():
                    b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
         except Exception:
             time.sleep(0.01)
+
 
 # ---- Rotas HTTP ----
 @app.route("/")
