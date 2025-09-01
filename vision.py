@@ -1,6 +1,5 @@
 # vision.py
-# Utilitários de visão: HSV para verde/vermelho, calibração por clique,
-# e detecção robusta de marcadores verdes (ROI + filtro de forma).
+# HSV/Greens: calibração por clique + detecção robusta (ROI/forma) dos marcadores.
 
 import cv2
 import numpy as np
@@ -10,33 +9,25 @@ class Vision:
         self.log = log_function
         self.config = config or {}
 
-        # Centro da imagem (default 640x480)
         self.WIDTH = self.config.get("width", 640)
         self.HEIGHT = self.config.get("height", 480)
         self.CENTER_X = self.WIDTH // 2
 
-        # HSV defaults (ajuste via calibração)
-        # Verde (quadradinho OBR). Esses valores são ponto de partida — calibre no web.
+        # HSV defaults (ajuste via clique na UI)
         self.LOWER_GREEN = np.array(self.config.get("lower_green", [40, 60, 50]), dtype=np.uint8)
         self.UPPER_GREEN = np.array(self.config.get("upper_green", [85, 255, 255]), dtype=np.uint8)
 
-        # Vermelho em 2 faixas (wrap no H)
         self.LOWER_RED1 = np.array(self.config.get("lower_red1", [0, 120, 60]), dtype=np.uint8)
         self.UPPER_RED1 = np.array(self.config.get("upper_red1", [10, 255, 255]), dtype=np.uint8)
         self.LOWER_RED2 = np.array(self.config.get("lower_red2", [170, 120, 60]), dtype=np.uint8)
         self.UPPER_RED2 = np.array(self.config.get("upper_red2", [180, 255, 255]), dtype=np.uint8)
 
-        # Área mínima para considerar marcador (px^2)
         self.GREEN_THRESHOLD_AREA = int(self.config.get("green_min_area", 150))
-
-        # ROI vertical para busca do verde (relativo à imagem 480p)
         self.GREEN_Y1 = int(self.config.get("green_y1", 120))
         self.GREEN_Y2 = int(self.config.get("green_y2", 220))
 
-        # Debounce/estado interno (não persistimos)
         self._last_click_hsv = None
 
-    # ===== configuração =====
     def update_config(self, cfg: dict):
         if not cfg:
             return
@@ -57,9 +48,8 @@ class Vision:
         self.GREEN_Y1 = int(self.config.get("green_y1", self.GREEN_Y1))
         self.GREEN_Y2 = int(self.config.get("green_y2", self.GREEN_Y2))
 
-    # ===== calibração por clique (web) =====
+    # ===== calibração por clique =====
     def calibrate_by_click(self, frame_bgr, x, y, color: str):
-        """Ajusta range HSV a partir de um clique (pequena vizinhança)."""
         if frame_bgr is None:
             return False
         x = int(np.clip(x, 0, frame_bgr.shape[1]-1))
@@ -79,10 +69,8 @@ class Vision:
             self.log(f"HSV GREEN ajustado: {self.LOWER_GREEN.tolist()} .. {self.UPPER_GREEN.tolist()}")
             return True
         elif color.lower() == "red":
-            # Ajuste simples para faixa 1; faixa 2 espelha
             base_low = np.array([h_min, s_min, v_min], dtype=np.int32)
             base_up  = np.array([h_max, s_max, v_max], dtype=np.int32)
-            # se h médio > 150, provavelmente faixa 2
             if (h_min + h_max)/2 > 150:
                 self.LOWER_RED2 = np.clip(base_low - np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
                 self.UPPER_RED2 = np.clip(base_up  + np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
@@ -96,19 +84,14 @@ class Vision:
             self.log("HSV RED ajustado.")
             return True
         else:
-            # preto/branco não calibramos via HSV aqui
             return False
 
-    # ===== verdes (ROI + forma + direção) =====
+    # ===== verdes (ROI + forma) =====
     def detect_greens(self, frame_bgr):
-        """
-        Retorna (centroides, direção)
-        direção: "left" | "right" | "uturn" | None
-        """
+        """Retorna (centroides, direção: left/right/uturn/None)."""
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
 
-        # ROI vertical para buscar apenas na região típica dos quadrados
         y1, y2 = int(self.GREEN_Y1), int(self.GREEN_Y2)
         y1 = max(0, min(self.HEIGHT-1, y1))
         y2 = max(y1+1, min(self.HEIGHT, y2))
@@ -126,7 +109,6 @@ class Vision:
                 continue
             rectangularity = float(area) / rect_area
             aspect = w / float(h)
-            # quadrado compacto
             if rectangularity < 0.6 or not (0.7 <= aspect <= 1.3):
                 continue
             M = cv2.moments(cnt)
