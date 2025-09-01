@@ -130,3 +130,4 @@ class Vision:
                 direction = "right"
 
         return centroids, direction
+    
