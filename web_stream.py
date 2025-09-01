@@ -2,7 +2,7 @@
 # Flask + Socket.IO com estado compartilhado e streaming MJPEG do last_frame.
 
 import cv2
-from flask import Flask, Response, request, render_template_string, send_from_directory, jsonify
+from flask import Flask, Response, send_from_directory, jsonify
 from flask_socketio import SocketIO, emit
 import threading
 import time
@@ -10,13 +10,13 @@ import time
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
-# Estado compartilhado (será substituído pelo main.py se ele importar e usar)
+# Estado compartilhado (o main.py pode sobrescrever isso ao importar)
 SHARED_STATE = {
     "config": {},
     "last_frame": None,          # numpy BGR
     "speeds": {"left": 0, "right": 0},
     "status": "idle",
-    "view_mode": "normal",
+    "view_mode": "preview",      # já abre em Preview
     "derivative_scan": None,
     "path_history": [],
     "log": [],
@@ -45,11 +45,9 @@ def mjpeg_generator():
     while True:
         frame = _get_frame_bgr()
         if frame is None:
-            # antes do robô iniciar, aguarda um pouco
             time.sleep(0.05)
             continue
         try:
-            # codifica BGR -> JPEG
             ok, jpg = cv2.imencode(".jpg", frame)
             if not ok:
                 time.sleep(0.01)
@@ -63,7 +61,6 @@ def mjpeg_generator():
 # ---- Rotas HTTP ----
 @app.route("/")
 def root():
-    # se você já tem um index.html na pasta do projeto, sirva-o:
     return send_from_directory(".", "index.html")
 
 @app.route("/index.html")
@@ -77,7 +74,6 @@ def stream():
 
 @app.route("/state")
 def state():
-    # endpoint útil para debug da UI
     with _state_lock:
         return jsonify({
             "status": SHARED_STATE.get("status", ""),
@@ -90,7 +86,6 @@ def state():
 @socketio.on("connect")
 def on_connect():
     emit("log_message", {"text": "Socket conectado."})
-    # envia um snapshot de status
     with _state_lock:
         emit("status", {
             "status": SHARED_STATE.get("status", "idle"),
@@ -104,7 +99,7 @@ def on_command(cmd):
     Espera payloads como:
       {"name":"start_robot"}
       {"name":"stop_robot"}
-      {"name":"set_view_mode","data":{"mode":"mask"}}
+      {"name":"set_view_mode","data":{"mode":"preview"}}
       {"name":"calibrate_pixel","data":{"x":123,"y":321,"color":"green"}}
       {"name":"save_config","data":{"vision":{...},"pid":{...}}}
     """
@@ -140,12 +135,8 @@ def on_command(cmd):
         emit("log_message", {"text": f"Erro ao executar comando {name}: {e}"})
 
 
-# ---- Utilitário chamado periodicamente pelo main (opcional) ----
+# Compat opcional (o main já atualiza SHARED_STATE diretamente)
 def update_stream_data(frame, mask, contours, speeds, status_data, derivative_data):
-    """
-    Se o seu main quiser empurrar dados por aqui, mantenho compatibilidade.
-    A versão atual do main atualiza SHARED_STATE diretamente, então isso é opcional.
-    """
     with _state_lock:
         SHARED_STATE["last_frame"] = frame
         SHARED_STATE["speeds"] = speeds or SHARED_STATE["speeds"]
@@ -156,5 +147,4 @@ def update_stream_data(frame, mask, contours, speeds, status_data, derivative_da
 
 
 if __name__ == "__main__":
-    # útil se quiser testar este arquivo isolado (sem o main)
     socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
