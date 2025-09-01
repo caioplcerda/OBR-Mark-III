@@ -1,12 +1,14 @@
 # main.py
-# Segue-linha robusto p/ LINHA GROSSA:
+# Segue-linha robusto p/ LINHA GROSSA + robô rápido:
 # - multi-ROI (faixas) + regressão -> ângulo
-# - interseção com debounce e distinção de CURVA 90°
-# - marcadores verdes (ROI + forma) com debounce
-# - ações: left/right/straight/uturn
-# - Preview com faixas, centróides, linha, look-ahead, INT e C90
+# - interseção TOP-first (antecipa cruzamento), com debounce independente
+# - distinção Interseção x Curva 90° (bimodalidade + deslocamento + ângulo)
+# - gaps (jumps): extrapola base por alguns frames (sem "linha perdida")
+# - ignora 15% laterais (evita linhas paralelas nas bordas)
+# - verdes (ROI + forma) com debounce; ações: left/right/straight/uturn
+# - Preview com faixas, centróides, linha, look-ahead, INT/C90, AHEAD
 #
-# Rode:  python3 main.py  e abra http://<ip>:5000/
+# Rode:  python3 main.py   e abra http://<ip>:5000/
 
 import os
 import cv2
@@ -124,7 +126,7 @@ class Camera:
 
 
 class Robot:
-    """Segue-linha com interseções/curva90 e verdes robustos."""
+    """Segue-linha com interseções/curva90 e verdes robustos; TOP-first; gaps; bordas ignoradas."""
     WIDTH = 640
     HEIGHT = 480
 
@@ -144,12 +146,21 @@ class Robot:
     ADAPT_C = 7
     MORPH = 3
 
+    # Cortar 15% laterais (evita paralelas nas bordas)
+    SIDE_MARGIN_FRACTION = 0.15  # 15%
+
     # Interseção (linha grossa) + debounce
     INTERSECTION_WIDTH_PX = 180
     INTERSECT_DEBOUNCE = 2
 
+    # Interseção "TOP-first" (antecipa)
+    INTERSECT_AHEAD_DEBOUNCE = 2  # frames
+
     # Verdes (debounce)
     GREEN_DEBOUNCE = 2
+
+    # Jumps (gaps) – quantos frames manter a extrapolação da base
+    MAX_GAP_FRAMES = 8
 
     # PID defaults
     PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
@@ -166,10 +177,13 @@ class Robot:
 
         # buffers/estado
         self._intersect_seen = 0
+        self._intersect_ahead_seen = 0
         self._green_seen = 0
         self._green_last = None
         self.planned_direction = None    # "left"|"right"|"straight"|"uturn"|None
         self.turning_until = 0.0
+
+        self._gap_frames_left = 0        # contagem p/ extrapolação da base
 
         # config persistente
         self.cfg_path = "config.json"
@@ -178,6 +192,10 @@ class Robot:
         # FPS
         self._last_ts = time.time()
         self._frames = 0
+
+        # margens laterais em px
+        self.LEFT_CROP = int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
+        self.RIGHT_CROP = self.WIDTH - int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
 
     # ===== ciclo de vida =====
     def start(self):
@@ -272,7 +290,7 @@ class Robot:
             right = int(max(-100, min(100, base_speed + error)))
             self.hardware.set_motor_speed(left, right)        # (left, right)
 
-    # ===== visão: binário/centróides =====
+    # ===== visão: binário/centróides (com corte lateral) =====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if self.BIN_BLUR > 1:
@@ -284,24 +302,28 @@ class Robot:
         if self.MORPH > 0:
             k = cv2.getStructuringElement(cv2.MORPH_RECT, (self.MORPH, self.MORPH))
             bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=1)
+        # zera 15% laterais para ignorar paralelas de borda
+        bw[:, :self.LEFT_CROP] = 0
+        bw[:, self.RIGHT_CROP:] = 0
         return bw  # 255 = linha; 0 = fundo
 
     def _strip_centroid(self, bw, y0, h):
         H, W = bw.shape[:2]
         y0 = max(0, min(H - 1, int(y0)))
         y1 = max(0, min(H, int(y0 + h)))
-        roi = bw[y0:y1, :]
+        # aplica corte lateral
+        roi = bw[y0:y1, self.LEFT_CROP:self.RIGHT_CROP]
         colsum = roi.sum(axis=0)  # 255 por pixel ligado
         if colsum.max() < 255 * h * 0.05:
             return None, 0
-        x = np.arange(W, dtype=np.float32)
+        x = np.arange(self.LEFT_CROP, self.RIGHT_CROP, dtype=np.float32)
         cx = float((x * colsum).sum() / (colsum.sum() + 1e-6))
         cy = int((y0 + y1) / 2)
-        # largura "integrada" no centro (nº de px ligados nas linhas centrais)
         center_band = roi[max(0, h//2-1):min(h, h//2+1), :]
         width_est = int(np.count_nonzero(center_band))
         return (int(cx), int(cy)), width_est
 
+    # ===== regressão =====
     def _fit_angle(self, pts):
         if len(pts) < 2:
             return 0.0
@@ -317,7 +339,7 @@ class Robot:
         H, W = bw.shape[:2]
         y0 = max(0, min(H - 1, int(y0)))
         y1 = max(0, min(H, int(y0 + h)))
-        roi = bw[y0:y1, :]
+        roi = bw[y0:y1, self.LEFT_CROP:self.RIGHT_CROP]
         colsum = roi.sum(axis=0).astype(np.float32)
         if colsum.max() > 0:
             colsum /= (255.0 * h)  # normaliza [0,1]
@@ -339,20 +361,26 @@ class Robot:
         sep = max(peaks[j]-peaks[i] for i in range(len(peaks)) for j in range(i+1, len(peaks)))
         return sep >= min_sep_px
 
-    def _detect_intersection(self, bw, widths, cents, angle_deg):
-        """Retorna (is_intersection, is_curve90)."""
-        prof_bottom = self._strip_profile(bw, self.STRIP_BOTTOM, self.STRIP_H)
-        prof_mid = self._strip_profile(bw, self.STRIP_BOTTOM - 2*self.STRIP_H, self.STRIP_H)
+    def _detect_intersection_core(self, bw, widths, cents, angle_deg, idx_bottom=0, idx_mid=2):
+        """Decide interseção e curva90 usando um par (bottom, mid) de índices de faixa."""
+        # perfis nas faixas escolhidas
+        yb = self.STRIP_BOTTOM - idx_bottom*self.STRIP_H
+        ym = self.STRIP_BOTTOM - idx_mid*self.STRIP_H
+        prof_bottom = self._strip_profile(bw, yb, self.STRIP_H)
+        prof_mid = self._strip_profile(bw, ym, self.STRIP_H)
 
         bimodal_bottom = self._is_bimodal(prof_bottom, min_sep_px=70, min_peak=0.16)
         bimodal_mid = self._is_bimodal(prof_mid, min_sep_px=60, min_peak=0.14)
 
-        wide_bottom = widths[0] >= self.INTERSECTION_WIDTH_PX
-        wide_mid = (len(widths) > 2) and (widths[2] >= self.INTERSECTION_WIDTH_PX*0.85)
+        w_bottom = widths[idx_bottom] if idx_bottom < len(widths) else 0
+        w_mid = widths[idx_mid] if idx_mid < len(widths) else 0
+        wide_bottom = w_bottom >= self.INTERSECTION_WIDTH_PX
+        wide_mid = w_mid >= self.INTERSECTION_WIDTH_PX*0.85
 
         dx = 0.0
-        if len(cents) > 3 and cents[0] and cents[3]:
-            dx = float(cents[0][0] - cents[3][0])
+        up = idx_mid
+        if up < len(cents) and cents[idx_bottom] and cents[up]:
+            dx = float(cents[idx_bottom][0] - cents[up][0])
         big_shift = abs(dx) >= 90
         ang_high = abs(angle_deg) >= 28.0
 
@@ -360,18 +388,38 @@ class Robot:
         is_curve90 = (ang_high and big_shift) and not (bimodal_bottom or bimodal_mid)
         return is_intersection, is_curve90
 
+    def _detect_intersection(self, bw, widths, cents, angle_deg):
+        """
+        Retorna (is_intersection_now, is_curve90, is_intersection_ahead)
+        - now: usa bottom/mid padrão (0,2)
+        - ahead: usa pares mais altos (N-1, N-3) p/ antecipar
+        """
+        # NOW (perto da base)
+        is_now, is_c90_now = self._detect_intersection_core(bw, widths, cents, angle_deg, idx_bottom=0, idx_mid=2)
+
+        # AHEAD (lá no topo)
+        top = self.N_STRIPS - 1
+        mid_top = max(0, top - 2)
+        is_ahead, _ = self._detect_intersection_core(bw, widths, cents, angle_deg, idx_bottom=mid_top, idx_mid=top)
+
+        return is_now, is_c90_now, is_ahead
+
     # ===== preview =====
-    def _draw_preview(self, frame, bw, cents, fit_angle, look_point, is_intersection, is_curve90, green_dir):
+    def _draw_preview(self, frame, bw, cents, fit_angle, look_point, is_intersection, is_curve90, is_ahead, green_dir):
         out = frame.copy()
 
         # linha-base
         y_base = int(self.STRIP_BOTTOM)
         cv2.line(out, (0, y_base), (self.WIDTH-1, y_base), (0, 0, 255), 2)
 
+        # zonas de corte lateral (só pra visualizar)
+        cv2.rectangle(out, (0, 0), (self.LEFT_CROP, self.HEIGHT-1), (40, 40, 40), 1)
+        cv2.rectangle(out, (self.RIGHT_CROP, 0), (self.WIDTH-1, self.HEIGHT-1), (40, 40, 40), 1)
+
         # faixas + centróides
         for i, c in enumerate(cents):
             y0 = int(self.STRIP_BOTTOM - i*self.STRIP_H)
-            cv2.rectangle(out, (0, y0), (self.WIDTH-1, y0 + self.STRIP_H), (80, 80, 80), 1)
+            cv2.rectangle(out, (self.LEFT_CROP, y0), (self.RIGHT_CROP-1, y0 + self.STRIP_H), (80, 80, 80), 1)
             if c is not None:
                 cv2.circle(out, (int(c[0]), int(c[1])), 6, (0, 200, 0), -1, cv2.LINE_AA)
 
@@ -389,6 +437,7 @@ class Robot:
         txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
         if is_intersection: txt += "  INT"
         if is_curve90: txt += "  C90"
+        if is_ahead: txt += "  AHEAD"
         if green_dir: txt += f"  GREEN:{green_dir}"
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
@@ -409,21 +458,45 @@ class Robot:
                     cents.append(c)
                     widths.append(w)
 
-                c0 = cents[0]
-                if c0 is None:
-                    self._publish(frame, "Linha perdida (faixa base)")
-                    try:
-                        self.hardware.stop()
-                    except Exception:
-                        pass
-                    time.sleep(0.01)
-                    continue
-
-                self.history.append(c0[0])
-
-                # regressão
+                # --- TOP-first interseção / curva90 ---
                 valids = [p for p in cents if p is not None]
                 angle = self._fit_angle(valids)
+                is_intersection, is_curve90, is_ahead = self._detect_intersection(bw, widths, cents, angle)
+
+                # debounce AHEAD
+                if is_ahead:
+                    self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
+                else:
+                    self._intersect_ahead_seen = 0
+                confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
+
+                # --- centróide base (com gaps) ---
+                c0 = cents[0]
+                if c0 is None:
+                    # GAP: base sumiu, mas há pontos acima?
+                    upper = [p for p in cents[1:] if p is not None]
+                    if upper and (self._gap_frames_left < self.MAX_GAP_FRAMES):
+                        # extrapola x na base com o ângulo atual (ou histórico)
+                        steps = 1
+                        est_x = (upper[0][0] + np.tan(np.radians(angle)) * steps * self.STRIP_H) if angle is not None else (self.history[-1] if self.history else self.WIDTH//2)
+                        est_x = int(np.clip(est_x, self.LEFT_CROP, self.RIGHT_CROP-1))
+                        c0 = (est_x, int(self.STRIP_BOTTOM + self.STRIP_H//2))
+                        self._gap_frames_left += 1
+                    else:
+                        # sem como extrapolar
+                        self._gap_frames_left = 0
+                        self._publish(frame, "Linha perdida (faixa base)")
+                        try:
+                            self.hardware.stop()
+                        except Exception:
+                            pass
+                        time.sleep(0.01)
+                        continue
+                else:
+                    # reset se temos base válida
+                    self._gap_frames_left = 0
+
+                self.history.append(c0[0])
 
                 # look-ahead
                 steps = 5
@@ -432,8 +505,7 @@ class Robot:
                 look = (int(np.clip(look[0], 0, self.WIDTH-1)),
                         int(np.clip(look[1], 0, self.HEIGHT-1)))
 
-                # interseção x curva 90 + debounce
-                is_intersection, is_curve90 = self._detect_intersection(bw, widths, cents, angle)
+                # debounce NOW
                 if is_intersection:
                     self._intersect_seen = min(self._intersect_seen + 1, 10)
                 else:
@@ -449,7 +521,7 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # decisões de interseção (não aciona em curva 90)
+                # decisões (só aciona interseção quando confirmada e não for curva 90)
                 now = time.time()
                 if confirmed_intersection and not is_curve90:
                     if confirmed_green == "uturn":
@@ -479,6 +551,7 @@ class Robot:
                         self._green_seen = 0
                         self._intersect_seen = 0
                     else:
+                        # sem marca -> reto
                         self.planned_direction = "straight"
                         self.turning_until = now + 0.4
                         log("Interseção sem marca — seguindo reto.")
@@ -487,6 +560,7 @@ class Robot:
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
 
+                # viés temporário de curva
                 if self.planned_direction and now < self.turning_until:
                     bias = 120 if self.planned_direction == "left" else (-120 if self.planned_direction == "right" else 0)
                     error += bias
@@ -499,7 +573,7 @@ class Robot:
                 # preview
                 out = frame
                 if SHARED_STATE.get("view_mode") == "preview":
-                    out = self._draw_preview(frame, bw, cents, angle, look, confirmed_intersection, is_curve90, confirmed_green)
+                    out = self._draw_preview(frame, bw, cents, angle, look, confirmed_intersection, is_curve90, confirmed_ahead, confirmed_green)
 
                 # publica
                 self._publish(out, "OK")
