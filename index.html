@@ -46,7 +46,7 @@
   <pre id="log"></pre>
 
   <script>
-    const socket = io({ transports: ["websocket"] });
+    const socket = io({ transports: ["polling"] });
 
     const logEl = document.getElementById("log");
     function addLog(t){ logEl.textContent += t + "\n"; logEl.scrollTop = logEl.scrollHeight; }
