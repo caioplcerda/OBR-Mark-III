@@ -6,6 +6,8 @@
 # - gaps (jumps): extrapola base por alguns frames (sem "linha perdida")
 # - ignora 15% laterais (evita linhas paralelas nas bordas)
 # - verdes (ROI + forma) com debounce; ações: left/right/straight/uturn
+# - segue reto um tempinho ao perder linha (grace)
+# - Botão físico em BCM 21 (toggle start/stop)
 # - Preview com faixas, centróides, linha, look-ahead, INT/C90, AHEAD
 #
 # Rode:  python3 main.py   e abra http://<ip>:5000/
@@ -38,6 +40,19 @@ try:
     WEB_AVAILABLE = True
 except Exception:
     WEB_AVAILABLE = False
+
+# ==== Botão físico (opcional) ====
+GPIO_AVAILABLE = False
+try:
+    import RPi.GPIO as GPIO
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BCM)
+    GPIO_AVAILABLE = True
+except Exception:
+    GPIO_AVAILABLE = False
+
+BUTTON_PIN = 21                 # <<< Botão físico (pino 40) — NÃO conflita com 17/27 do seu driver
+REQUIRE_BUTTON_TO_START = True  # True: só inicia via botão físico ou via UI
 
 # ==== Dependências de projeto ====
 from hardware_control import HardwareControl
@@ -162,6 +177,9 @@ class Robot:
     # Jumps (gaps) – quantos frames manter a extrapolação da base
     MAX_GAP_FRAMES = 8
 
+    # “Perdeu a linha → segue reto” por alguns frames
+    LINE_LOSS_GRACE_FRAMES = 12
+
     # PID defaults
     PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
 
@@ -183,7 +201,8 @@ class Robot:
         self.planned_direction = None    # "left"|"right"|"straight"|"uturn"|None
         self.turning_until = 0.0
 
-        self._gap_frames_left = 0        # contagem p/ extrapolação da base
+        self._gap_frames_left = 0        # extrapolação da base
+        self._line_loss_grace = 0        # seguir reto mesmo sem base
 
         # config persistente
         self.cfg_path = "config.json"
@@ -284,11 +303,12 @@ class Robot:
     # ===== motores =====
     def _drive(self, base_speed: float, error: float):
         try:
-            self.hardware.set_motor_speed(base_speed, error)  # (base, erro)
+            self.hardware.set_motor_speed(base_speed, error)  # (base, erro) — compatível com seu HardwareControl
         except TypeError:
+            # fallback p/ API (left,right)
             left = int(max(-100, min(100, base_speed - error)))
             right = int(max(-100, min(100, base_speed + error)))
-            self.hardware.set_motor_speed(left, right)        # (left, right)
+            self.hardware.set_motor_speed(left, right)
 
     # ===== visão: binário/centróides (com corte lateral) =====
     def _binarize(self, frame_bgr):
@@ -463,14 +483,14 @@ class Robot:
                 angle = self._fit_angle(valids)
                 is_intersection, is_curve90, is_ahead = self._detect_intersection(bw, widths, cents, angle)
 
-                # debounce AHEAD
+                # debounce AHEAD (apenas aviso/planejamento)
                 if is_ahead:
                     self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
                 else:
                     self._intersect_ahead_seen = 0
                 confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
 
-                # --- centróide base (com gaps) ---
+                # --- centróide base (com gaps e grace) ---
                 c0 = cents[0]
                 if c0 is None:
                     # GAP: base sumiu, mas há pontos acima?
@@ -482,10 +502,22 @@ class Robot:
                         est_x = int(np.clip(est_x, self.LEFT_CROP, self.RIGHT_CROP-1))
                         c0 = (est_x, int(self.STRIP_BOTTOM + self.STRIP_H//2))
                         self._gap_frames_left += 1
+                        self._line_loss_grace = 0
                     else:
-                        # sem como extrapolar
+                        # segue reto por alguns frames (grace)
+                        if self._line_loss_grace < self.LINE_LOSS_GRACE_FRAMES:
+                            self._line_loss_grace += 1
+                            self._drive(self.BASE_SPEED, 0.0)
+                            out = frame if SHARED_STATE.get("view_mode") != "preview" else self._draw_preview(
+                                frame, bw, cents, angle, None, False, False, confirmed_ahead, None
+                            )
+                            self._publish(out, f"Linha sumiu — seguindo reto ({self._line_loss_grace}/{self.LINE_LOSS_GRACE_FRAMES})")
+                            time.sleep(0.003)
+                            continue
+                        # realmente perdido
                         self._gap_frames_left = 0
-                        self._publish(frame, "Linha perdida (faixa base)")
+                        self._line_loss_grace = 0
+                        self._publish(frame, "Linha perdida")
                         try:
                             self.hardware.stop()
                         except Exception:
@@ -495,6 +527,7 @@ class Robot:
                 else:
                     # reset se temos base válida
                     self._gap_frames_left = 0
+                    self._line_loss_grace = 0
 
                 self.history.append(c0[0])
 
@@ -528,7 +561,7 @@ class Robot:
                         log("UTURN: dois verdes — retornando até reacoplar.")
                         t0 = time.time()
                         timeout = 3.0
-                        while time.time() - t0 < timeout and self.running:
+                        while time.time() - t0 < timeout && self.running:
                             try:
                                 self.hardware.set_motor_speed(0, 120)  # gira no lugar
                             except TypeError:
@@ -644,14 +677,67 @@ def _wire_web(robot: Robot):
         log(f"Falha ao integrar com web_stream: {e}")
 
 
+def _setup_button(robot: Robot):
+    """Registra o botão físico em BCM 21, com checagem de conflito com pinos do HardwareControl."""
+    if not GPIO_AVAILABLE:
+        log("GPIO indisponível: iniciando sem botão físico.")
+        return
+
+    # tenta detectar conflito com pinos do HardwareControl
+    used = set()
+    try:
+        hc = robot.hardware
+        used.update([
+            getattr(hc, "L_BIN1", None), getattr(hc, "L_BIN2", None), getattr(hc, "L_PWMB", None),
+            getattr(hc, "R_BIN1", None), getattr(hc, "R_BIN2", None), getattr(hc, "R_PWMB", None),
+            getattr(hc, "STBY", None),
+            getattr(hc, "START_BUTTON", None),
+            getattr(hc, "ENCODER_A_L", None), getattr(hc, "ENCODER_B_L", None),
+            getattr(hc, "ENCODER_A_R", None), getattr(hc, "ENCODER_B_R", None),
+        ])
+        used = {p for p in used if isinstance(p, int)}
+    except Exception:
+        used = set()
+
+    if BUTTON_PIN in used:
+        log(f"Botão físico DESATIVADO: BCM {BUTTON_PIN} conflita com pinos do HardwareControl: {sorted(used)}")
+        return
+
+    try:
+        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        def _toggle(channel):
+            try:
+                if robot.running:
+                    log("Botão: STOP")
+                    robot.stop()
+                else:
+                    log("Botão: START")
+                    robot.start()
+            except Exception as e:
+                log(f"Erro no botão: {e}")
+
+        GPIO.add_event_detect(BUTTON_PIN, GPIO.FALLING, callback=_toggle, bouncetime=350)
+        log(f"Botão físico pronto no BCM {BUTTON_PIN} (pull-up).")
+    except Exception as e:
+        log(f"Falha ao inicializar botão no BCM {BUTTON_PIN}: {e}")
+
+
 def main():
     robot = Robot()
     _wire_web(robot)
+    _setup_button(robot)
 
     if WEB_AVAILABLE and hasattr(web_stream, "app"):
         host = os.environ.get("HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", "5000"))
         log(f"Servidor web em http://{host}:{port}")
+
+        if not REQUIRE_BUTTON_TO_START:
+            log("Iniciando automaticamente (REQUIRE_BUTTON_TO_START=False).")
+            robot.start()
+        else:
+            log("Aguardando botão físico (ou UI) para START...")
+
         try:
             if hasattr(web_stream, "socketio"):
                 web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
@@ -661,16 +747,29 @@ def main():
             pass
         finally:
             robot.cleanup()
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.cleanup()
+                except Exception:
+                    pass
     else:
         log("Rodando headless (sem servidor web).")
-        try:
+        if not REQUIRE_BUTTON_TO_START:
             robot.start()
+        else:
+            log("Headless aguardando botão físico para START...")
+        try:
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
             pass
         finally:
             robot.cleanup()
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.cleanup()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
