@@ -22,6 +22,7 @@
     <button data-mode="mask" class="mode">Mask</button>
     <button data-mode="contours" class="mode">Contours</button>
     <button data-mode="derivative" class="mode">Derivatives</button>
+    <button data-mode="preview" class="mode"><b>Preview</b></button>
     <span id="status">Status: —</span>
     <span id="fps">FPS: —</span>
     <span id="speeds">Speeds: —</span>
@@ -61,7 +62,7 @@
       document.getElementById("speeds").textContent = `Speeds: L=${sp.left ?? "—"} R=${sp.right ?? "—"}`;
     });
 
-    // Poll leve para atualizar status (caso o servidor não esteja emitindo status push)
+    // Poll leve para atualizar status
     setInterval(async () => {
       try {
         const res = await fetch("/state");
@@ -87,11 +88,9 @@
     // Calibração por clique
     const img = document.getElementById("video");
     img.addEventListener("click", ev => {
-      // Coordenadas no elemento
       const rect = img.getBoundingClientRect();
       const rx = (ev.clientX - rect.left) / rect.width;
       const ry = (ev.clientY - rect.top) / rect.height;
-      // Converte para 640x480 originais
       const x = Math.round(rx * 640);
       const y = Math.round(ry * 480);
       const color = document.getElementById("color").value;
