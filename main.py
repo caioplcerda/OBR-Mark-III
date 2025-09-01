@@ -1,7 +1,9 @@
 # main.py
-# Estilo RCJ 2014 com defensivas: scanline/scancircle/derivada no loop,
-# modo PREVIEW com overlay (círculos/pontos/centroides/crosshair/linha-base),
-# PID defaults, compat de set_motor_speed, UI web opcional e Picamera2/USB.
+# Estilo RCJ 2014 com defensivas e suporte a LINHA GROSSA:
+# - scanline/scancircle/derivada no loop
+# - fallbacks robustos (maior faixa escura e arco escuro)
+# - modo PREVIEW (círculos/pontos/centroides/crosshair/linha-base)
+# - PID defaults, compat de set_motor_speed, UI web opcional e Picamera2/USB.
 
 import os
 import cv2
@@ -123,29 +125,33 @@ class Camera:
 
 class Robot:
     """
-    Núcleo à la RCJ_2014.cpp:
+    Núcleo à la RCJ_2014.cpp com tolerância a LINHA GROSSA:
       - ZERO scan (linha horizontal na base)
-      - FIRST scan (círculo com look-ahead pelo ângulo estimado)
-      - SECOND/THIRD scan (refinos de look-ahead)
+      - FIRST/SECOND/THIRD (círculos com look-ahead)
+      - fallback 1D/anel para linha grossa
       - erro composto = offset_x + k*ângulo
-      - decisões por verde (left/right/uturn/straight) e chegada (vermelho)
-      - modo PREVIEW com overlay igual ao do exemplo
+      - detecção verde/vermelho
+      - modo PREVIEW
     """
     # ==== Constantes de "pilotagem" no estilo RCJ ====
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 50          # velocidade base (ajuste conforme tua ponte H/motores)
-    MIX_ANGLE = 0.6          # ganho do termo angular no erro composto
-    MAX_ANGLE = 45.0         # clamp em graus
+    BASE_SPEED = 55          # um pouco mais alto para vencer inércia
+    MIX_ANGLE = 0.7          # ganho do termo angular no erro composto (linha grossa precisa mais direção)
+    MAX_ANGLE = 50.0         # clamp em graus
 
-    ZERO_SCAN_Y = 420        # linha baixa para "zero scan" (imagem 480p, já girada 180°)
-    ZERO_SCAN_RADIUS = 320   # metade da largura coberta no zero scan
-    CIRCLE_RADIUS = 22       # raio pequeno do scancircle (ponto local)
-    LOOK_WIDTH_DEG = 180     # janela angular usada no look-ahead
+    ZERO_SCAN_Y = 440        # mais perto da base para estabilizar 1º ponto
+    ZERO_SCAN_RADIUS = 320   # metade da largura
+    CIRCLE_RADIUS = 30       # raio maior ajuda linha grossa
+    LOOK_WIDTH_DEG = 140     # janela mais estreita: reduz falsas escolhas
 
-    # PID defaults (evita KeyError no HardwareControl.__init__)
-    PID_DEFAULTS = {"kp": 0.8, "ki": 0.0, "kd": 0.12, "sample_time": 0.02}
+    # LARGURA MÍNIMA para RCJ (evita pegar apenas uma borda)
+    ZERO_MIN_WIDTH = 28
+    CIRCLE_MIN_WIDTH = 16
+
+    # PID defaults
+    PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
 
     def __init__(self):
         self.running = False
@@ -155,14 +161,12 @@ class Robot:
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
         self.vision = Vision({}, log)  # (config, log_function)
-
-        # IMPORTANTE: HardwareControl exige config com 'pid' completo no __init__
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
         # Variáveis RCJ
         self.first_scanpoint = (self.WIDTH // 2, self.ZERO_SCAN_Y)
         self.first_angle_deg = 0.0
-        self.line_points = deque(maxlen=7)
+        self.line_points = deque(maxlen=9)
 
         # Configuração persistente
         self.cfg_path = "config.json"
@@ -225,27 +229,20 @@ class Robot:
             cfg["pid"].setdefault(k, v)
 
     def save_config(self, new_cfg: dict):
-        """Persiste parâmetros vindos da UI e propaga para Vision/Hardware (defensivo)."""
         try:
             SHARED_STATE["config"].update(new_cfg or {})
             self._ensure_pid_defaults(SHARED_STATE["config"])
-
             with open(self.cfg_path, "w", encoding="utf-8") as f:
                 json.dump(SHARED_STATE["config"], f, ensure_ascii=False, indent=2)
-
-            # Visão
             if "vision" in SHARED_STATE["config"]:
                 self.vision.update_config(SHARED_STATE["config"]["vision"])
-
-            # Hardware (PID)
             try:
                 if hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
                     self.hardware.config.update(SHARED_STATE["config"])
                 if hasattr(self.hardware, "update_pid_from_config"):
                     self.hardware.update_pid_from_config()
             except Exception as e:
-                log(f"Aviso: falha ao propagar PID para HardwareControl: {e}")
-
+                log(f"Aviso: falha ao propagar PID p/ HardwareControl: {e}")
             log("Config salva.")
             return True
         except Exception as e:
@@ -253,18 +250,14 @@ class Robot:
             return False
 
     def _load_config_if_any(self):
-        """Carrega config.json (se existir) e propaga para Vision/Hardware (defensivo)."""
         if os.path.exists(self.cfg_path):
             try:
                 with open(self.cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-
                 self._ensure_pid_defaults(cfg)
                 SHARED_STATE["config"] = cfg
-
                 if "vision" in cfg:
                     self.vision.update_config(cfg["vision"])
-
                 try:
                     if hasattr(self.hardware, "config") and isinstance(self.hardware.config, dict):
                         self.hardware.config.update(cfg)
@@ -272,28 +265,115 @@ class Robot:
                         self.hardware.update_pid_from_config()
                 except Exception as e:
                     log(f"Aviso: falha ao aplicar PID do config.json: {e}")
-
                 log("Config carregada.")
             except Exception as e:
                 log(f"Falha ao ler config.json: {e}")
 
     # ====== Helpers de controle ======
     def _drive(self, base_speed: float, error: float):
-        """
-        Compat: se hardware_control.set_motor_speed aceitar (base, erro), usa direto.
-        Se aceitar (left, right), converte.
-        """
         try:
-            # Tentativa 1: assinatura (base, erro)
-            self.hardware.set_motor_speed(base_speed, error)
+            self.hardware.set_motor_speed(base_speed, error)  # (base, erro)
         except TypeError:
-            # Tentativa 2: assinatura (left, right)
             left = int(max(-100, min(100, base_speed - error)))
             right = int(max(-100, min(100, base_speed + error)))
-            self.hardware.set_motor_speed(left, right)
+            self.hardware.set_motor_speed(left, right)        # (left, right)
+
+    # ====== Fallbacks p/ LINHA GROSSA ======
+    def _zero_scan_fallback(self, gray):
+        """Escolhe a MAIOR faixa escura contínua na linha y=ZERO_SCAN_Y e usa o meio."""
+        y = int(self.ZERO_SCAN_Y)
+        row = gray[y, :].astype(np.float32)
+        # suaviza para reduzir ruído
+        k = 9
+        row_s = np.convolve(row, np.ones(k)/k, mode="same")
+        # limiar adaptativo (entre min e média)
+        thr = 0.5*(row_s.min() + row_s.mean())
+        dark = row_s < thr
+
+        # encontra maiores segmentos True
+        best_len, best_l, best_r = 0, None, None
+        i = 0
+        W = dark.shape[0]
+        while i < W:
+            if dark[i]:
+                j = i
+                while j < W and dark[j]:
+                    j += 1
+                seg_len = j - i
+                if seg_len > best_len:
+                    best_len, best_l, best_r = seg_len, i, j-1
+                i = j
+            else:
+                i += 1
+
+        if best_len >= self.ZERO_MIN_WIDTH:
+            cx = (best_l + best_r) // 2
+            return (int(cx), y)
+        return None
+
+    def _circle_scan_fallback(self, gray, center, look_deg, win_deg=140):
+        """Amostra um anel e pega o ARCO mais escuro na janela em torno do look_deg."""
+        cx, cy = int(center[0]), int(center[1])
+        R = int(self.CIRCLE_RADIUS)
+        # amostras por 360° (densidade suficientemente boa)
+        N = 180
+        angs = np.linspace(-np.pi, np.pi, N, endpoint=False)
+        # janela de look-ahead
+        look = np.deg2rad(look_deg)
+        # normaliza ângulos relativos à janela
+        def wrap(a):
+            d = (a - look + np.pi) % (2*np.pi) - np.pi
+            return d
+        # escolhe apenas os ângulos dentro da janela
+        half = np.deg2rad(win_deg/2)
+        idx = np.where(np.abs(wrap(angs)) <= half)[0]
+        if len(idx) < 8:
+            return None
+
+        sel_angs = angs[idx]
+        vals = []
+        for a in sel_angs:
+            x = int(cx + R*np.cos(a))
+            y = int(cy + R*np.sin(a))
+            if 0 <= x < gray.shape[1] and 0 <= y < gray.shape[0]:
+                vals.append(float(gray[y, x]))
+            else:
+                vals.append(255.0)
+        vals = np.array(vals, dtype=np.float32)
+        # suaviza
+        k = max(5, len(vals)//25*2+1)  # ímpar
+        ker = np.ones(k, dtype=np.float32)/k
+        vals_s = np.convolve(vals, ker, mode="same")
+
+        # limiar adaptativo e maior arco escuro
+        thr = 0.5*(vals_s.min() + vals_s.mean())
+        dark = vals_s < thr
+
+        best_len, best_l, best_r = 0, None, None
+        i = 0
+        L = len(dark)
+        while i < L:
+            if dark[i]:
+                j = i
+                while j < L and dark[j]:
+                    j += 1
+                seg_len = j - i
+                if seg_len > best_len:
+                    best_len, best_l, best_r = seg_len, i, j-1
+                i = j
+            else:
+                i += 1
+
+        if best_len >= self.CIRCLE_MIN_WIDTH//2:
+            mid = (best_l + best_r)//2
+            a = sel_angs[mid]
+            px = int(cx + R*np.cos(a))
+            py = int(cy + R*np.sin(a))
+            return (px, py)
+        return None
 
     # ====== Desenho do PREVIEW (overlay) ======
-    def _crosshair(self, img, pt, color=(0,165,255), size=10, thickness=2):  # laranja
+    def _crosshair(self, img, pt, color=(0,165,255), size=10, thickness=2):
         if not pt:
             return
         x, y = int(pt[0]), int(pt[1])
@@ -302,71 +382,50 @@ class Robot:
         cv2.circle(img, (x, y), size, color, thickness, cv2.LINE_AA)
 
     def _draw_preview(self, frame, p0, p1, p2, p3, greens, green_dir, angs1, angs2, angs3):
-        """
-        Desenha:
-         - linha-base (zero scan) em vermelho
-         - círculos/anéis de scan (azul/ciano) e pontos encontrados (vermelho)
-         - 'trilho' verde indicando o look-ahead
-         - centróides verdes e crosshair no P0
-        """
         overlay = frame.copy()
-
-        # (1) linha-base (zero scan)
-        cv2.line(overlay,
-                 (0, self.ZERO_SCAN_Y),
-                 (self.WIDTH - 1, self.ZERO_SCAN_Y),
-                 (0, 0, 255), 2)  # vermelho
-
-        # (2) círculo do FIRST/SECOND/THIRD scan (azul) no ponto atual
+        # linha-base
+        cv2.line(overlay, (0, self.ZERO_SCAN_Y), (self.WIDTH-1, self.ZERO_SCAN_Y), (0,0,255), 2)
+        # círculo atual
         if len(self.line_points) > 0:
             cx, cy = self.line_points[0]
-            cv2.circle(overlay, (int(cx), int(cy)), self.CIRCLE_RADIUS, (255, 0, 0), 1, cv2.LINE_AA)  # azul
-
-        # anel "pontilhado" (ciano) sobre os vetores de ângulos
+            cv2.circle(overlay, (int(cx), int(cy)), self.CIRCLE_RADIUS, (255,0,0), 1, cv2.LINE_AA)
+        # anel pontilhado
         def _ring_points(angs):
             if angs is None or len(self.line_points) == 0:
                 return
             cx, cy = self.line_points[0]
             step = max(1, len(angs)//12)
             for k in range(0, len(angs), step):
-                x = int(cx + self.CIRCLE_RADIUS * np.cos(angs[k]))
-                y = int(cy + self.CIRCLE_RADIUS * np.sin(angs[k]))
-                cv2.circle(overlay, (x, y), 3, (255, 255, 0), -1, cv2.LINE_AA)  # ciano
-
-        _ring_points(angs1)
-        _ring_points(angs2)
-        _ring_points(angs3)
-
-        # (3) pontos detectados (vermelho) + círculo azul leve ao redor
+                x = int(cx + self.CIRCLE_RADIUS*np.cos(angs[k]))
+                y = int(cy + self.CIRCLE_RADIUS*np.sin(angs[k]))
+                cv2.circle(overlay, (x, y), 3, (255,255,0), -1, cv2.LINE_AA)
+        _ring_points(angs1); _ring_points(angs2); _ring_points(angs3)
+        # pontos dos scans
         for pt in [p0, p1, p2, p3]:
             if pt:
-                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 7, (0, 0, 255), -1, cv2.LINE_AA)  # vermelho
-                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 16, (255, 0, 0), 1, cv2.LINE_AA)  # azul
-
-        # (4) “trilho” verde baseado no look-ahead
+                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 7, (0,0,255), -1, cv2.LINE_AA)
+                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 16, (255,0,0), 1, cv2.LINE_AA)
+        # “trilho” verde (look-ahead)
         if len(self.line_points) > 0:
             cx, cy = self.line_points[0]
             look_rad = np.deg2rad(self.first_angle_deg)
             step = self.CIRCLE_RADIUS
             for t in range(1, 8):
-                x = int(cx + t * step * np.cos(look_rad))
-                y = int(cy + t * step * np.sin(look_rad))
-                cv2.circle(overlay, (x, y), 6, (0, 200, 0), -1, cv2.LINE_AA)
-
-        # (5) centróides dos marcadores verdes + mira em P0
+                x = int(cx + t*step*np.cos(look_rad))
+                y = int(cy + t*step*np.sin(look_rad))
+                cv2.circle(overlay, (x, y), 6, (0,200,0), -1, cv2.LINE_AA)
+        # centróides verdes + mira
         if greens:
             for (gx, gy) in greens:
-                cv2.circle(overlay, (int(gx), int(gy)), 10, (0, 255, 0), 2, cv2.LINE_AA)
-        self._crosshair(overlay, p0, (0, 165, 255), 12, 2)  # laranja
-
-        # (6) status
+                cv2.circle(overlay, (int(gx), int(gy)), 10, (0,255,0), 2, cv2.LINE_AA)
+        self._crosshair(overlay, p0, (0,165,255), 12, 2)
+        # status
         status = f"dir={green_dir or '-'} look={self.first_angle_deg:+.1f}"
-        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
+        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
+        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
         return overlay
 
-    # ====== Lógica principal estilo RCJ ======
+    # ====== Lógica principal ======
     def _push_point(self, p):
         self.line_points.appendleft(p)
         try:
@@ -386,7 +445,7 @@ class Robot:
     def _loop(self):
         try:
             while self.running:
-                frame = self.camera.read()  # BGR (já rotacionado em Camera)
+                frame = self.camera.read()
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
                 status_msg = "OK"
@@ -404,9 +463,13 @@ class Robot:
                     "line",
                     {"center_point": (self.first_scanpoint[0], self.ZERO_SCAN_Y),
                      "radius": self.ZERO_SCAN_RADIUS},
-                    min_line_width=12,
+                    min_line_width=self.ZERO_MIN_WIDTH,
                 )
                 derivative_export = deriv0
+
+                # Fallback para linha grossa
+                if not p0:
+                    p0 = self._zero_scan_fallback(gray)
 
                 if not p0:
                     try:
@@ -414,7 +477,6 @@ class Robot:
                     except Exception:
                         pass
                     status_msg = "Linha perdida (zero scan)."
-                    # publica frame sem overlay
                     self._publish(frame, status_msg, derivative_export)
                     time.sleep(0.01)
                     continue
@@ -433,8 +495,11 @@ class Robot:
                 p1, _ = rcj.find_line_from_scan(
                     scan1, angs1, "circle",
                     {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS},
-                    min_line_width=6,
+                    min_line_width=self.CIRCLE_MIN_WIDTH,
                 )
+                if not p1:
+                    p1 = self._circle_scan_fallback(gray, self.line_points[0], self.first_angle_deg, self.LOOK_WIDTH_DEG)
+
                 if not p1:
                     try:
                         self.hardware.stop()
@@ -453,12 +518,16 @@ class Robot:
 
                 # ---------- (C) SECOND SCAN ----------
                 scan2, angs2 = rcj.scancircle(
-                    gray, self.line_points[0], self.CIRCLE_RADIUS, self.first_angle_deg, 180
+                    gray, self.line_points[0], self.CIRCLE_RADIUS, self.first_angle_deg, 120
                 )
                 p2, _ = rcj.find_line_from_scan(
                     scan2, angs2, "circle",
-                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
+                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS},
+                    min_line_width=self.CIRCLE_MIN_WIDTH,
                 )
+                if not p2:
+                    p2 = self._circle_scan_fallback(gray, self.line_points[0], self.first_angle_deg, 120)
+
                 if not p2:
                     try:
                         self.hardware.stop()
@@ -473,12 +542,16 @@ class Robot:
                 # ---------- (D) THIRD SCAN ----------
                 look2 = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
                 scan3, angs3 = rcj.scancircle(
-                    gray, self.line_points[0], self.CIRCLE_RADIUS, look2, 180
+                    gray, self.line_points[0], self.CIRCLE_RADIUS, look2, 120
                 )
                 p3, _ = rcj.find_line_from_scan(
                     scan3, angs3, "circle",
-                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS}, 6
+                    {"center_point": self.line_points[0], "radius": self.CIRCLE_RADIUS},
+                    min_line_width=self.CIRCLE_MIN_WIDTH,
                 )
+                if not p3:
+                    p3 = self._circle_scan_fallback(gray, self.line_points[0], look2, 120)
+
                 if not p3:
                     try:
                         self.hardware.stop()
@@ -494,7 +567,6 @@ class Robot:
                 P_err = self.first_scanpoint[0] - (self.WIDTH // 2)
                 I_err = rcj.line_angle_from_points(self.line_points[1], self.line_points[0]) if len(self.line_points) > 1 else 0.0
                 err_comp = float(P_err) + self.MIX_ANGLE * float(I_err)
-
                 self._drive(self.BASE_SPEED, err_comp)
 
                 # ---------- (F) Eventos ----------
@@ -507,7 +579,7 @@ class Robot:
 
                 if green_dir == "uturn":
                     log("Marcadores verdes dos dois lados: U-turn.")
-                    self._drive(0, -120)  # gira
+                    self._drive(0, -120)
                     time.sleep(0.5)
 
                 if red_detected:
@@ -527,7 +599,7 @@ class Robot:
                 self._publish(frame_out, status_msg, derivative_export,
                               extras={"green": green_dir, "greens": greens, "red": red_detected})
 
-                time.sleep(0.005)  # folga CPU
+                time.sleep(0.005)
 
         except KeyboardInterrupt:
             log("Interrompido.")
@@ -616,7 +688,6 @@ def main():
         finally:
             robot.cleanup()
     else:
-        # Sem web: inicia imediatamente
         log("Rodando em modo headless (sem servidor web).")
         try:
             robot.start()
