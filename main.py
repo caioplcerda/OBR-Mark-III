@@ -7,6 +7,7 @@ import cv2
 import json
 import time
 import threading
+import numpy as np
 from datetime import datetime
 from collections import deque
 
@@ -168,6 +169,81 @@ class Robot:
         # Medição de FPS
         self._last_ts = time.time()
         self._frames = 0
+        
+    # ====== Desenho do PREVIEW (overlay) ======
+    def _crosshair(self, img, pt, color=(0,165,255), size=10, thickness=2):  # laranja
+        if pt is None:
+            return
+        x, y = int(pt[0]), int(pt[1])
+        cv2.line(img, (x - size, y), (x + size, y), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x, y - size), (x, y + size), color, thickness, cv2.LINE_AA)
+        cv2.circle(img, (x, y), size, color, thickness, cv2.LINE_AA)
+
+    def _draw_preview(self, frame, p0, p1, p2, p3, greens, green_dir, angs1, angs2, angs3):
+        """
+        Desenha:
+         - linha-base (zero scan) em vermelho
+         - círculos de scan (azul) e pontos encontrados (vermelho)
+         - 'trilho' verde (bolinhas) na direção do look-ahead (trajetória prevista)
+         - centróides verdes (verde) e mira (laranja)
+        """
+        overlay = frame.copy()
+
+        # (1) linha-base (zero scan)
+        cv2.line(overlay,
+                 (0, self.ZERO_SCAN_Y),
+                 (self.WIDTH - 1, self.ZERO_SCAN_Y),
+                 (0, 0, 255), 2)  # vermelho
+
+        # (2) círculo do FIRST/SECOND/THIRD scan (azul)
+        if len(self.line_points) > 0:
+            cx, cy = self.line_points[0]
+            cv2.circle(overlay, (int(cx), int(cy)), self.CIRCLE_RADIUS, (255, 0, 0), 1, cv2.LINE_AA)  # azul
+
+        # desenha alguns pontos do anel para ficar “pontilhado” (azul-claro)
+        def _ring_points(angs):
+            if angs is None:
+                return
+            cx, cy = self.line_points[0]
+            for k in range(0, len(angs), max(1, len(angs)//12)):
+                x = int(cx + self.CIRCLE_RADIUS * np.cos(angs[k]))
+                y = int(cy + self.CIRCLE_RADIUS * np.sin(angs[k]))
+                cv2.circle(overlay, (x, y), 3, (255, 255, 0), -1, cv2.LINE_AA)  # ciano
+
+        _ring_points(angs1)
+        _ring_points(angs2)
+        _ring_points(angs3)
+
+        # (3) pontos detectados nos scans (vermelho) e “splash” ao redor (azul) como no exemplo
+        for pt in [p0, p1, p2, p3]:
+            if pt:
+                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 7, (0, 0, 255), -1, cv2.LINE_AA)  # vermelho cheio
+                cv2.circle(overlay, (int(pt[0]), int(pt[1])), 16, (255, 0, 0), 1, cv2.LINE_AA)  # azul leve ao redor
+
+        # (4) “trilho” verde: pequenos círculos ao longo do look-ahead (caminho previsto)
+        if len(self.line_points) > 0:
+            cx, cy = self.line_points[0]
+            look_deg = self.first_angle_deg
+            look_rad = np.deg2rad(look_deg)
+            step = self.CIRCLE_RADIUS  # usa o mesmo raio como passo
+            for t in range(1, 8):
+                x = int(cx + t * step * np.cos(look_rad))
+                y = int(cy + t * step * np.sin(look_rad))
+                cv2.circle(overlay, (x, y), 6, (0, 200, 0), -1, cv2.LINE_AA)  # verde
+
+        # (5) centróides dos marcadores verdes
+        if greens:
+            for (gx, gy) in greens:
+                cv2.circle(overlay, (int(gx), int(gy)), 10, (0, 255, 0), 2, cv2.LINE_AA)
+            # mira no último ponto de linha para “alvo”
+            self._crosshair(overlay, self.first_scanpoint, (0, 165, 255), 12, 2)  # laranja
+
+        # (6) texto de debug
+        status = f"dir={green_dir or '-'} look={self.first_angle_deg:+.1f} P0x={p0[0] if p0 else '-'}"
+        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(overlay, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+
+        return overlay
 
     # ===== Ciclo de vida =====
     def start(self):
