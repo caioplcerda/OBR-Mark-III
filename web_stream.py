@@ -1,5 +1,6 @@
 # web_stream.py
-# Flask + Socket.IO com estado compartilhado e streaming MJPEG do last_frame.
+# Flask + Socket.IO + MJPEG robusto.
+# Inclui "FORCE_RGB_INPUT" para evitar cores trocadas e stream preto.
 
 import cv2
 from flask import Flask, Response, send_from_directory, jsonify
@@ -10,17 +11,18 @@ import time
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
-# Estado compartilhado (o main.py pode sobrescrever isso ao importar)
+# Se a imagem sair com cores invertidas, deixe True
+FORCE_RGB_INPUT = False
+
+# Estado compartilhado; o main.py pode sobrescrever esse dict
 SHARED_STATE = {
     "config": {},
-    "last_frame": None,          # numpy BGR
+    "last_frame": None,          # numpy array (BGR ou RGB com flag)
     "speeds": {"left": 0, "right": 0},
     "status": "idle",
-    "view_mode": "preview",      # já abre em Preview
-    "derivative_scan": None,
-    "path_history": [],
-    "log": [],
+    "view_mode": "preview",
     "fps": 0.0,
+    "log": [],
 }
 
 _robot = None
@@ -30,29 +32,22 @@ def register_robot(robot):
     global _robot
     _robot = robot
 
-# ---- Helpers ----
-def _get_frame_bgr():
+def _get_frame():
     with _state_lock:
         return SHARED_STATE.get("last_frame", None)
 
-def _log(msg):
-    with _state_lock:
-        SHARED_STATE["log"].append(msg)
-        SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
-
-# ---- MJPEG stream ----
+# MJPEG
 def mjpeg_generator():
     while True:
-        frame = _get_frame_bgr()
+        frame = _get_frame()
         if frame is None:
             time.sleep(0.05)
             continue
         try:
             img = frame
-            # Se sua pipeline estiver produzindo RGB por algum motivo, convertemos pra BGR aqui:
             if FORCE_RGB_INPUT:
+                # se pipeline estiver em RGB, converte para BGR antes de encodar
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            # IMPORTANTE: cv2.imencode espera BGR
             ok, jpg = cv2.imencode(".jpg", img)
             if not ok:
                 time.sleep(0.01)
@@ -63,8 +58,7 @@ def mjpeg_generator():
         except Exception:
             time.sleep(0.01)
 
-
-# ---- Rotas HTTP ----
+# Rotas
 @app.route("/")
 def root():
     return send_from_directory(".", "index.html")
@@ -85,10 +79,10 @@ def state():
             "status": SHARED_STATE.get("status", ""),
             "speeds": SHARED_STATE.get("speeds", {}),
             "fps": SHARED_STATE.get("fps", 0),
-            "view_mode": SHARED_STATE.get("view_mode", "normal"),
+            "view_mode": SHARED_STATE.get("view_mode", "preview"),
         })
 
-# ---- Socket.IO ----
+# Socket.IO
 @socketio.on("connect")
 def on_connect():
     emit("log_message", {"text": "Socket conectado."})
@@ -101,14 +95,6 @@ def on_connect():
 
 @socketio.on("command")
 def on_command(cmd):
-    """
-    Espera payloads como:
-      {"name":"start_robot"}
-      {"name":"stop_robot"}
-      {"name":"set_view_mode","data":{"mode":"preview"}}
-      {"name":"calibrate_pixel","data":{"x":123,"y":321,"color":"green"}}
-      {"name":"save_config","data":{"vision":{...},"pid":{...}}}
-    """
     global _robot
     name = (cmd or {}).get("name", "")
     data = (cmd or {}).get("data", {}) or {}
@@ -125,7 +111,7 @@ def on_command(cmd):
             _robot.stop()
             emit("log_message", {"text": "Robô parado."})
         elif name == "set_view_mode":
-            _robot.set_view_mode(data.get("mode", "normal"))
+            _robot.set_view_mode(data.get("mode", "preview"))
         elif name == "calibrate_pixel":
             x = int(data.get("x", 0))
             y = int(data.get("y", 0))
@@ -138,18 +124,7 @@ def on_command(cmd):
         else:
             emit("log_message", {"text": f"Comando desconhecido: {name}"})
     except Exception as e:
-        emit("log_message", {"text": f"Erro ao executar comando {name}: {e}"})
-
-
-# Compat opcional (o main já atualiza SHARED_STATE diretamente)
-def update_stream_data(frame, mask, contours, speeds, status_data, derivative_data):
-    with _state_lock:
-        SHARED_STATE["last_frame"] = frame
-        SHARED_STATE["speeds"] = speeds or SHARED_STATE["speeds"]
-        if status_data and "status" in status_data:
-            SHARED_STATE["status"] = status_data["status"]
-        if derivative_data is not None:
-            SHARED_STATE["derivative_scan"] = derivative_data
+        emit("log_message", {"text": f"Erro no comando {name}: {e}"})
 
 
 if __name__ == "__main__":
