@@ -1,97 +1,150 @@
 # vision.py
-# Visão estilo RCJ 2014: binarização simples, detecção de verdes/vermelhos,
-# calibração de cores (HSV) e apoio ao main.py.
+# Utilitários de visão: HSV para verde/vermelho, calibração por clique,
+# e detecção robusta de marcadores verdes (ROI + filtro de forma).
 
 import cv2
 import numpy as np
 
 class Vision:
-    def __init__(self, config=None, log_function=None):
+    def __init__(self, config: dict = None, log_function=print):
+        self.log = log_function
         self.config = config or {}
-        self.log = log_function or (lambda m: print(m))
 
-        # Limites HSV básicos (ajustáveis via calibração por clique)
-        # preto = linha
-        self.LOWER_BLACK = np.array([0, 0, 0])
-        self.UPPER_BLACK = np.array([180, 255, 60])
+        # Centro da imagem (default 640x480)
+        self.WIDTH = self.config.get("width", 640)
+        self.HEIGHT = self.config.get("height", 480)
+        self.CENTER_X = self.WIDTH // 2
 
-        # branco = fundo
-        self.LOWER_WHITE = np.array([0, 0, 180])
-        self.UPPER_WHITE = np.array([180, 40, 255])
+        # HSV defaults (ajuste via calibração)
+        # Verde (quadradinho OBR). Esses valores são ponto de partida — calibre no web.
+        self.LOWER_GREEN = np.array(self.config.get("lower_green", [40, 60, 50]), dtype=np.uint8)
+        self.UPPER_GREEN = np.array(self.config.get("upper_green", [85, 255, 255]), dtype=np.uint8)
 
-        # verde = marcadores
-        self.LOWER_GREEN = np.array([40, 70, 70])
-        self.UPPER_GREEN = np.array([80, 255, 255])
+        # Vermelho em 2 faixas (wrap no H)
+        self.LOWER_RED1 = np.array(self.config.get("lower_red1", [0, 120, 60]), dtype=np.uint8)
+        self.UPPER_RED1 = np.array(self.config.get("upper_red1", [10, 255, 255]), dtype=np.uint8)
+        self.LOWER_RED2 = np.array(self.config.get("lower_red2", [170, 120, 60]), dtype=np.uint8)
+        self.UPPER_RED2 = np.array(self.config.get("upper_red2", [180, 255, 255]), dtype=np.uint8)
 
-        # vermelho = chegada (duas faixas porque HSV é circular)
-        self.LOWER_RED1 = np.array([0, 120, 70])
-        self.UPPER_RED1 = np.array([10, 255, 255])
-        self.LOWER_RED2 = np.array([170, 120, 70])
-        self.UPPER_RED2 = np.array([180, 255, 255])
+        # Área mínima para considerar marcador (px^2)
+        self.GREEN_THRESHOLD_AREA = int(self.config.get("green_min_area", 150))
 
-        self.GREEN_THRESHOLD_AREA = 200  # área mínima pra aceitar verde
+        # ROI vertical para busca do verde (relativo à imagem 480p)
+        self.GREEN_Y1 = int(self.config.get("green_y1", 120))
+        self.GREEN_Y2 = int(self.config.get("green_y2", 220))
 
-    # ==== calibração ====
-    def calibrate_by_click(self, frame_bgr, x, y, color):
-        """
-        Ajusta limites HSV com base em um clique do usuário no stream.
-        """
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        pixel = hsv[y, x]
-        h, s, v = int(pixel[0]), int(pixel[1]), int(pixel[2])
+        # Debounce/estado interno (não persistimos)
+        self._last_click_hsv = None
 
-        tol = 20
-        lower = np.array([max(0, h - tol), max(0, s - tol), max(0, v - tol)])
-        upper = np.array([min(180, h + tol), min(255, s + tol), min(255, v + tol)])
-
-        if color == "black":
-            self.LOWER_BLACK, self.UPPER_BLACK = lower, upper
-        elif color == "white":
-            self.LOWER_WHITE, self.UPPER_WHITE = lower, upper
-        elif color == "green":
-            self.LOWER_GREEN, self.UPPER_GREEN = lower, upper
-        elif color == "red":
-            self.LOWER_RED1, self.UPPER_RED1 = lower, upper
-            # cria segunda faixa pra complementar circularidade do vermelho
-            self.LOWER_RED2, self.UPPER_RED2 = lower, upper
-        else:
-            return False
-
-        self.log(f"Calibração {color}: lower={lower}, upper={upper}")
-        return True
-
-    # ==== máscaras rápidas (estilo RCJ: tudo em HSV simples) ====
-    def mask_black(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        return cv2.inRange(hsv, self.LOWER_BLACK, self.UPPER_BLACK)
-
-    def mask_green(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        return cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
-
-    def mask_red(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        m1 = cv2.inRange(hsv, self.LOWER_RED1, self.UPPER_RED1)
-        m2 = cv2.inRange(hsv, self.LOWER_RED2, self.UPPER_RED2)
-        return cv2.add(m1, m2)
-
-    # ==== utilitário pra atualizar config salva ====
-    def update_config(self, cfg):
+    # ===== configuração =====
+    def update_config(self, cfg: dict):
         if not cfg:
             return
-        if "lower_black" in cfg and "upper_black" in cfg:
-            self.LOWER_BLACK = np.array(cfg["lower_black"])
-            self.UPPER_BLACK = np.array(cfg["upper_black"])
-        if "lower_white" in cfg and "upper_white" in cfg:
-            self.LOWER_WHITE = np.array(cfg["lower_white"])
-            self.UPPER_WHITE = np.array(cfg["upper_white"])
-        if "lower_green" in cfg and "upper_green" in cfg:
-            self.LOWER_GREEN = np.array(cfg["lower_green"])
-            self.UPPER_GREEN = np.array(cfg["upper_green"])
-        if "lower_red1" in cfg and "upper_red1" in cfg:
-            self.LOWER_RED1 = np.array(cfg["lower_red1"])
-            self.UPPER_RED1 = np.array(cfg["upper_red1"])
-        if "lower_red2" in cfg and "upper_red2" in cfg:
-            self.LOWER_RED2 = np.array(cfg["lower_red2"])
-            self.UPPER_RED2 = np.array(cfg["upper_red2"])
-        self.log("Vision config atualizada via update_config")
+        self.config.update(cfg)
+        self.WIDTH = self.config.get("width", self.WIDTH)
+        self.HEIGHT = self.config.get("height", self.HEIGHT)
+        self.CENTER_X = self.WIDTH // 2
+
+        if "lower_green" in self.config: self.LOWER_GREEN = np.array(self.config["lower_green"], dtype=np.uint8)
+        if "upper_green" in self.config: self.UPPER_GREEN = np.array(self.config["upper_green"], dtype=np.uint8)
+
+        if "lower_red1" in self.config: self.LOWER_RED1 = np.array(self.config["lower_red1"], dtype=np.uint8)
+        if "upper_red1" in self.config: self.UPPER_RED1 = np.array(self.config["upper_red1"], dtype=np.uint8)
+        if "lower_red2" in self.config: self.LOWER_RED2 = np.array(self.config["lower_red2"], dtype=np.uint8)
+        if "upper_red2" in self.config: self.UPPER_RED2 = np.array(self.config["upper_red2"], dtype=np.uint8)
+
+        self.GREEN_THRESHOLD_AREA = int(self.config.get("green_min_area", self.GREEN_THRESHOLD_AREA))
+        self.GREEN_Y1 = int(self.config.get("green_y1", self.GREEN_Y1))
+        self.GREEN_Y2 = int(self.config.get("green_y2", self.GREEN_Y2))
+
+    # ===== calibração por clique (web) =====
+    def calibrate_by_click(self, frame_bgr, x, y, color: str):
+        """Ajusta range HSV a partir de um clique (pequena vizinhança)."""
+        if frame_bgr is None:
+            return False
+        x = int(np.clip(x, 0, frame_bgr.shape[1]-1))
+        y = int(np.clip(y, 0, frame_bgr.shape[0]-1))
+        roi = frame_bgr[max(0, y-3):min(self.HEIGHT, y+4), max(0, x-3):min(self.WIDTH, x+4)]
+        if roi.size == 0:
+            return False
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+        h_min, s_min, v_min = int(np.percentile(h, 10)), int(np.percentile(s, 10)), int(np.percentile(v, 10))
+        h_max, s_max, v_max = int(np.percentile(h, 90)), int(np.percentile(s, 90)), int(np.percentile(v, 90))
+
+        if color.lower() == "green":
+            self.LOWER_GREEN = np.array([max(0, h_min-5), max(0, s_min-15), max(0, v_min-15)], dtype=np.uint8)
+            self.UPPER_GREEN = np.array([min(180, h_max+5), min(255, s_max+15), min(255, v_max+15)], dtype=np.uint8)
+            self._last_click_hsv = ("green", (self.LOWER_GREEN.tolist(), self.UPPER_GREEN.tolist()))
+            self.log(f"HSV GREEN ajustado: {self.LOWER_GREEN.tolist()} .. {self.UPPER_GREEN.tolist()}")
+            return True
+        elif color.lower() == "red":
+            # Ajuste simples para faixa 1; faixa 2 espelha
+            base_low = np.array([h_min, s_min, v_min], dtype=np.int32)
+            base_up  = np.array([h_max, s_max, v_max], dtype=np.int32)
+            # se h médio > 150, provavelmente faixa 2
+            if (h_min + h_max)/2 > 150:
+                self.LOWER_RED2 = np.clip(base_low - np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
+                self.UPPER_RED2 = np.clip(base_up  + np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
+            else:
+                self.LOWER_RED1 = np.clip(base_low - np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
+                self.UPPER_RED1 = np.clip(base_up  + np.array([5,15,15]), 0, [180,255,255]).astype(np.uint8)
+            self._last_click_hsv = ("red", (
+                self.LOWER_RED1.tolist(), self.UPPER_RED1.tolist(),
+                self.LOWER_RED2.tolist(), self.UPPER_RED2.tolist()
+            ))
+            self.log("HSV RED ajustado.")
+            return True
+        else:
+            # preto/branco não calibramos via HSV aqui
+            return False
+
+    # ===== verdes (ROI + forma + direção) =====
+    def detect_greens(self, frame_bgr):
+        """
+        Retorna (centroides, direção)
+        direção: "left" | "right" | "uturn" | None
+        """
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.LOWER_GREEN, self.UPPER_GREEN)
+
+        # ROI vertical para buscar apenas na região típica dos quadrados
+        y1, y2 = int(self.GREEN_Y1), int(self.GREEN_Y2)
+        y1 = max(0, min(self.HEIGHT-1, y1))
+        y2 = max(y1+1, min(self.HEIGHT, y2))
+        roi = mask[y1:y2, :]
+
+        contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        centroids = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self.GREEN_THRESHOLD_AREA:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            rect_area = w * h
+            if rect_area == 0:
+                continue
+            rectangularity = float(area) / rect_area
+            aspect = w / float(h)
+            # quadrado compacto
+            if rectangularity < 0.6 or not (0.7 <= aspect <= 1.3):
+                continue
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            gx = int(M["m10"] / M["m00"])
+            gy = int(M["m01"] / M["m00"]) + y1
+            centroids.append((gx, gy))
+
+        direction = None
+        if centroids:
+            left  = any(gx < (self.CENTER_X - 50) for gx, _ in centroids)
+            right = any(gx > (self.CENTER_X + 50) for gx, _ in centroids)
+            if left and right:
+                direction = "uturn"
+            elif left:
+                direction = "left"
+            elif right:
+                direction = "right"
+
+        return centroids, direction
