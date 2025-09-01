@@ -1,16 +1,13 @@
 # main.py
-# Segue-linha CONFIÁVEL p/ LINHA GROSSA usando multi-ROI (faixas horizontais),
-# regressão linear p/ ângulo, look-ahead simples, e preview completo.
-# Stream via web_stream (Flask+Socket.IO, MJPEG).
+# Segue-linha robusto para LINHA GROSSA com:
+# - multi-ROI (faixas horizontais) + regressão para ângulo
+# - detecção de interseção por largura em múltiplas faixas (com debounce)
+# - marcadores VERDES com ROI e filtro de forma (debounce)
+# - ações: esquerda, direita, reto (sem marca), retorno (duplo verde)
+# - Preview no stream (faixas, centróides, linha ajustada, look-ahead)
 #
-# Controles:
-#  - erro = offset (x do centróide da faixa mais baixa) + k * ângulo (graus)
-#  - _drive() tem compat (base, erro) ou (left, right)
-#
-# UI:
-#  - modos: normal | preview
-#  - Preview desenha faixas, centróides (verde), linha ajustada (azul),
-#    look-ahead (amarelo) e linha-base (vermelha).
+# Observação: o servidor web é fornecido por web_stream.py (importado aqui).
+# Rode apenas:  python3 main.py   e acesse http://<ip-do-raspberry>:5000/
 
 import os
 import cv2
@@ -43,7 +40,7 @@ except Exception:
 
 # ==== Dependências do projeto ====
 from hardware_control import HardwareControl
-from vision import Vision  # usamos o HSV do seu vision para verde/vermelho
+from vision import Vision  # HSV e detecção de verdes/vermelho
 
 # ==== Picamera2 (opcional) ====
 PICAMERA_AVAILABLE = False
@@ -128,7 +125,7 @@ class Camera:
 
 
 class Robot:
-    """Pipeline robusto para linha grossa com multi-ROI + regressão."""
+    """Pipeline robusto para linha grossa com multi-ROI + interseção + verdes."""
     WIDTH = 640
     HEIGHT = 480
 
@@ -141,13 +138,19 @@ class Robot:
     N_STRIPS = 8           # nº de faixas horizontais
     STRIP_H = 22           # altura de cada faixa
     STRIP_BOTTOM = 440     # y do topo da faixa mais baixa
-    # (as faixas sobem STRIP_H px por vez)
 
     # Limiares / morfologia
     BIN_BLUR = 3           # blur leve antes do binário
-    ADAPT_BLOCK = 21       # tamanho do bloco para adaptive threshold (ímpar)
-    ADAPT_C = 7            # constante subtraída
-    MORPH = 3              # abertura p/ quebrar pequenos “brilhos”
+    ADAPT_BLOCK = 21       # adaptive threshold (ímpar)
+    ADAPT_C = 7
+    MORPH = 3              # abertura p/ quebrar “brilhos”
+
+    # Interseção (largura de linha grossa)
+    INTERSECTION_WIDTH_PX = 180    # largura mínima (px) em 640px para considerar interseção
+    INTERSECT_DEBOUNCE = 2         # quadros consecutivos
+
+    # Verdes (debounce)
+    GREEN_DEBOUNCE = 2
 
     # PID defaults (evita KeyError no HardwareControl.__init__)
     PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
@@ -155,7 +158,6 @@ class Robot:
     def __init__(self):
         self.running = False
         self.thread = None
-        self.state = "IDLE"
 
         # Componentes
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
@@ -164,6 +166,13 @@ class Robot:
 
         # histórico de pontos p/ previsão suave
         self.history = deque(maxlen=5)  # últimos centróides da faixa base
+
+        # buffers/estado
+        self._intersect_seen = 0
+        self._green_seen = 0
+        self._green_last = None
+        self.planned_direction = None  # "left"|"right"|"straight"|"uturn"|None
+        self.turning_until = 0.0       # timestamp para ação de curva breve
 
         # Config persistente
         self.cfg_path = "config.json"
@@ -269,21 +278,20 @@ class Robot:
 
     # ===== processamento da linha =====
     def _binarize(self, frame_bgr):
-        # Normaliza luminância e binariza adaptativo p/ robustez
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if self.BIN_BLUR > 1:
             gray = cv2.GaussianBlur(gray, (self.BIN_BLUR, self.BIN_BLUR), 0)
-        bin_adapt = cv2.adaptiveThreshold(
+        bw = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV,
             self.ADAPT_BLOCK, self.ADAPT_C
         )
         if self.MORPH > 0:
             k = cv2.getStructuringElement(cv2.MORPH_RECT, (self.MORPH, self.MORPH))
-            bin_adapt = cv2.morphologyEx(bin_adapt, cv2.MORPH_OPEN, k, iterations=1)
-        return bin_adapt  # 255 = escuro/linha, 0 = fundo
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=1)
+        return bw  # 255 = linha (escuro), 0 = fundo
 
     def _strip_centroid(self, bw, y0, h):
-        """centro de massa (x) da maior área branca (linha) em uma faixa [y0:y0+h]."""
+        """centro de massa (x) da maior massa branca (linha) em uma faixa [y0:y0+h]."""
         H, W = bw.shape[:2]
         y0 = max(0, min(H - 1, int(y0)))
         y1 = max(0, min(H, int(y0 + h)))
@@ -291,46 +299,40 @@ class Robot:
         # soma por coluna
         colsum = roi.sum(axis=0)  # 255 por pixel ligado
         if colsum.max() < 255 * h * 0.05:  # pouquíssimos pixels -> vazio
-            return None
+            return None, 0
         x = np.arange(W, dtype=np.float32)
         cx = float((x * colsum).sum() / (colsum.sum() + 1e-6))
         cy = int((y0 + y1) / 2)
-        return (int(cx), int(cy))
+        # largura aproximada na linha média (px "ligados")
+        width_est = int(np.count_nonzero(roi[(h//2)-1:(h//2)+1, :] > 0))
+        return (int(cx), int(cy)), width_est
 
     def _fit_angle(self, pts):
-        """ajusta reta y = ax + b; devolve ângulo em graus (tangente de a)."""
+        """ajusta x = alpha*y + beta (melhor p/ faixas horizontais); devolve ângulo (°) em relação ao eixo x."""
         if len(pts) < 2:
             return 0.0
         xs = np.array([p[0] for p in pts], dtype=np.float32)
         ys = np.array([p[1] for p in pts], dtype=np.float32)
-        # x em função de y (mais estável porque faixas são horizontais)
-        # x = alpha*y + beta  => slope em pixels por px vertical
         A = np.vstack([ys, np.ones_like(ys)]).T
         alpha, beta = np.linalg.lstsq(A, xs, rcond=None)[0]
-        # direção do avanço é para "cima" (y menor); converte para ângulo (graus) relativo ao eixo y
-        # vetor direção ~ (dx, dy) = (alpha, -1)
-        angle_rad = np.arctan2(-1.0, alpha + 1e-6)  # atan2(dy, dx) mas com eixo trocado
-        # convertemos para "ângulo em graus vs horizontal": mais intuitivo p/ mistura
         angle_deg = np.degrees(np.arctan2(alpha, 1.0))
-        # clampa por segurança
-        angle_deg = float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
-        return angle_deg
+        return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
 
-    def _draw_preview(self, frame, bw, cents, fit_angle, look_point):
+    def _draw_preview(self, frame, bw, cents, fit_angle, look_point, is_intersection, green_dir):
         out = frame.copy()
 
         # linha-base (vermelha) = topo da faixa mais baixa
         y_base = int(self.STRIP_BOTTOM)
         cv2.line(out, (0, y_base), (self.WIDTH-1, y_base), (0, 0, 255), 2)
 
-        # desenha faixas e centróides (verde)
+        # faixas e centróides (verde)
         for i, c in enumerate(cents):
             y0 = int(self.STRIP_BOTTOM - i*self.STRIP_H)
             cv2.rectangle(out, (0, y0), (self.WIDTH-1, y0 + self.STRIP_H), (80, 80, 80), 1)
             if c is not None:
                 cv2.circle(out, (int(c[0]), int(c[1])), 6, (0, 200, 0), -1, cv2.LINE_AA)
 
-        # desenha linha ajustada (azul): passa pelo primeiro e último centróide válidos
+        # linha ajustada (azul)
         valids = [c for c in cents if c is not None]
         if len(valids) >= 2:
             pA = valids[0]
@@ -341,11 +343,14 @@ class Robot:
         if look_point is not None:
             cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # status
-        txt = f"angle={fit_angle:+.1f}  strips={len(valids)}"
+        # rótulos
+        txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
+        if is_intersection:
+            txt += "  INT"
+        if green_dir:
+            txt += f"  GREEN:{green_dir}"
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-
         return out
 
     # ===== loop =====
@@ -357,17 +362,19 @@ class Robot:
                 # --- binário da linha ---
                 bw = self._binarize(frame)  # 255 = linha (escuro), 0 = fundo
 
-                # --- centróides por faixas (de baixo pra cima) ---
+                # --- centróides e larguras por faixas (de baixo pra cima) ---
                 cents = []
+                widths = []
                 for i in range(self.N_STRIPS):
                     y0 = self.STRIP_BOTTOM - i*self.STRIP_H
-                    c = self._strip_centroid(bw, y0, self.STRIP_H)
+                    c, w = self._strip_centroid(bw, y0, self.STRIP_H)
                     cents.append(c)
+                    widths.append(w)
 
                 # precisa pelo menos o da faixa mais baixa
                 c0 = cents[0]
                 if c0 is None:
-                    self._publish(frame, "Linha perdida (faixa base vazia)", None)
+                    self._publish(frame, "Linha perdida (faixa base vazia)")
                     try:
                         self.hardware.stop()
                     except Exception:
@@ -375,42 +382,101 @@ class Robot:
                     time.sleep(0.01)
                     continue
 
-                # histórico para extrapolar quando faltar ponto em cima
+                # histórico
                 self.history.append(c0[0])
 
                 # regressão com pontos válidos
                 valids = [p for p in cents if p is not None]
                 angle = self._fit_angle(valids)
 
-                # look-ahead: projeta um ponto adiante seguindo o ângulo ajustado
-                # projeta a partir de c0 subindo algumas faixas
+                # look-ahead: projeta um ponto adiante seguindo ângulo
                 steps = 5
                 dx = np.tan(np.radians(angle)) * steps * self.STRIP_H
                 look = (c0[0] + dx, c0[1] - steps*self.STRIP_H)
                 look = (int(np.clip(look[0], 0, self.WIDTH-1)),
                         int(np.clip(look[1], 0, self.HEIGHT-1)))
 
-                # erro = offset_x + k*angulo
+                # --- interseção por largura (linha grossa) com debounce ---
+                wide_bottom = widths[0] >= self.INTERSECTION_WIDTH_PX
+                wide_mid = (len(widths) > 2) and (widths[2] >= self.INTERSECTION_WIDTH_PX*0.85)
+                is_intersection = wide_bottom and wide_mid
+                if is_intersection:
+                    self._intersect_seen = min(self._intersect_seen + 1, 10)
+                else:
+                    self._intersect_seen = 0
+                confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
+
+                # --- verdes (com ROI/filtros do Vision) + debounce ---
+                green_centroids, green_dir = self.vision.detect_greens(frame)
+                if green_dir:
+                    self._green_last = green_dir
+                    self._green_seen = min(self._green_seen + 1, 10)
+                else:
+                    self._green_seen = 0
+                confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
+
+                # --- decisões de interseção conforme regras OBR ---
+                now = time.time()
+                if confirmed_intersection:
+                    if confirmed_green == "uturn":
+                        # retorno: girar até reacoplar linha
+                        log("UTURN: dois verdes detectados — iniciando retorno.")
+                        t0 = time.time()
+                        timeout = 3.0
+                        while time.time() - t0 < timeout and self.running:
+                            try:
+                                self.hardware.set_motor_speed(0, 120)  # gira no lugar
+                            except TypeError:
+                                self.hardware.set_motor_speed(-60, 60)
+                            # reacoplou? (muita massa de linha na base)
+                            _, w0_re = self._strip_centroid(self._binarize(self.camera.read()), self.STRIP_BOTTOM, self.STRIP_H)
+                            if w0_re > 40:
+                                break
+                        self.hardware.stop()
+                        # depois do retorno, segue normal
+                        self._green_seen = 0
+                        self._intersect_seen = 0
+                        self._green_last = None
+                        self.planned_direction = None
+                        continue
+
+                    elif confirmed_green in ("left", "right"):
+                        # curva guiada por verde: injeta viés por curto período
+                        self.planned_direction = confirmed_green
+                        self.turning_until = now + 0.7  # ~700 ms de viés
+                        log(f"Curva {confirmed_green} marcada — aplicando viés por 0.7s.")
+                        # reseta debounce
+                        self._green_seen = 0
+                        self._intersect_seen = 0
+
+                    else:
+                        # interseção sem marca: seguir reto (NADA a fazer)
+                        self.planned_direction = "straight"
+                        self.turning_until = now + 0.4  # manter reto por ~400ms
+                        log("Interseção sem marca — seguindo reto.")
+
+                # erro = offset_x + k*angulo (+ viés se houver plano de curva)
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
+
+                # aplica viés temporário se houver curva planejada
+                if self.planned_direction and now < self.turning_until:
+                    bias = 120 if self.planned_direction == "left" else (-120 if self.planned_direction == "right" else 0)
+                    error += bias
+                elif self.planned_direction and now >= self.turning_until:
+                    # encerra plano de curva
+                    self.planned_direction = None
 
                 # drive
                 self._drive(self.BASE_SPEED, error)
 
-                # eventos (verde/vermelho simples, usando HSV do Vision)
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                green_mask = cv2.inRange(hsv, self.vision.LOWER_GREEN, self.vision.UPPER_GREEN)
-                red1 = cv2.inRange(hsv, self.vision.LOWER_RED1, self.vision.UPPER_RED1)
-                red2 = cv2.inRange(hsv, self.vision.LOWER_RED2, self.vision.UPPER_RED2)
-                red_mask = cv2.add(red1, red2)
-
                 # preview opcional
                 out = frame
                 if SHARED_STATE.get("view_mode") == "preview":
-                    out = self._draw_preview(frame, bw, cents, angle, look)
+                    out = self._draw_preview(frame, bw, cents, angle, look, confirmed_intersection, confirmed_green)
 
                 # publica
-                self._publish(out, "OK", None)
+                self._publish(out, "OK")
 
                 time.sleep(0.003)
 
@@ -424,7 +490,7 @@ class Robot:
             except Exception:
                 pass
 
-    def _publish(self, frame, status_msg, derivative_data):
+    def _publish(self, frame, status_msg):
         left = getattr(self.hardware, "last_left_speed", 0)
         right = getattr(self.hardware, "last_right_speed", 0)
         SHARED_STATE["last_frame"] = frame
