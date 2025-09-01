@@ -14,6 +14,9 @@ import numpy as np
 from datetime import datetime
 from collections import deque
 
+# Se o vídeo aparecer com cores invertidas (verde vira roxo, etc), troque para True
+FORCE_RGB_INPUT = False
+
 # ==== Integração opcional com servidor web ====
 WEB_AVAILABLE = False
 SHARED_STATE = {
@@ -317,9 +320,9 @@ class Robot:
         R = int(self.CIRCLE_RADIUS)
         # amostras por 360° (densidade suficientemente boa)
         N = 180
-        angs = np.linspace(-np.pi, np.pi, N, endpoint=False)
+        ang = rcj.line_angle_from_points(self.line_points[0], self.line_points[1])
         # janela de look-ahead
-        look = np.deg2rad(look_deg)
+        look2 = rcj.line_angle_from_points(self.line_points[0], self.line_points[1]) if len(self.line_points) > 1 else 0.0
         # normaliza ângulos relativos à janela
         def wrap(a):
             d = (a - look + np.pi) % (2*np.pi) - np.pi
