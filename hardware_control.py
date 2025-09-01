@@ -46,7 +46,7 @@ class HardwareControl:
 
     # ---------- CONFIG SERVOS ----------
     # Pinos S1..S4 (mude aqui se quiser)
-    SERVO_PINS = [12, 18, 16, 20]   # BCM (12/18 = HW PWM; 16/20 ok via PWM de software do RPi.GPIO)
+    SERVO_PINS = [7, 18, 16, 20]   # BCM (12/18 = HW PWM; 16/20 ok via PWM de software do RPi.GPIO)
     SERVO_FREQ_HZ = 50              # 50Hz = período ~20ms
 
     # Posições padrão em microssegundos (ajuste por servo se necessário)
