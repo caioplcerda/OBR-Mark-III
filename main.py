@@ -164,10 +164,12 @@ class Robot:
     # Ignorar 15% laterais (evitar paralelas nas bordas)
     SIDE_MARGIN_FRACTION = 0.15
 
-    # Interseção e debounce
-    INTERSECTION_WIDTH_PX = 180
-    INTERSECT_DEBOUNCE = 2
-    INTERSECT_AHEAD_DEBOUNCE = 2
+    # Interseção e debounce    # Interseção e debounce (mais rígido)
+    INTERSECTION_WIDTH_PX = 220      # antes 180
+    INTERSECTION_WIDTH_FRAC = 0.55   # >= 55% da largura útil (cálculo novo abaixo)
+    INTERSECT_DEBOUNCE = 4           # antes 2 (evita piscadas)
+    INTERSECT_AHEAD_DEBOUNCE = 3     # antes 2
+
 
     # Verdes
     GREEN_DEBOUNCE = 2
@@ -376,21 +378,27 @@ class Robot:
             colsum /= (255.0 * h)
         return colsum
 
-    def _is_bimodal(self, profile, min_sep_px=60, min_peak=0.15):
+        def _is_bimodal(self, profile, min_sep_px=80, min_peak=0.20):
         p = profile
-        if p is None or len(p) < 5:
+        if p is None or len(p) < 7:
             return False
-        k = max(5, (len(p)//100)*2+1)
+        # suaviza
+        k = max(7, (len(p)//80)*2+1)
         ker = np.ones(k, np.float32)/k
         ps = np.convolve(p, ker, mode="same")
+
+        # acha "picos" locais
         peaks = []
-        for i in range(1, len(ps)-1):
+        for i in range(2, len(ps)-2):
             if ps[i] > ps[i-1] and ps[i] > ps[i+1] and ps[i] >= min_peak:
                 peaks.append(i)
         if len(peaks) < 2:
             return False
+
+        # maior separação entre dois picos
         sep = max(peaks[j]-peaks[i] for i in range(len(peaks)) for j in range(i+1, len(peaks)))
         return sep >= min_sep_px
+
 
     def _detect_intersection_core(self, bw, widths, cents, angle_deg, idx_bottom=0, idx_mid=2):
         yb = self.STRIP_BOTTOM - idx_bottom*self.STRIP_H
