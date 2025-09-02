@@ -561,7 +561,7 @@ class Robot:
                         log("UTURN: dois verdes — retornando até reacoplar.")
                         t0 = time.time()
                         timeout = 3.0
-                        while time.time() - t0 < timeout && self.running:
+                        while time.time() - t0 < timeout and self.running:
                             try:
                                 self.hardware.set_motor_speed(0, 120)  # gira no lugar
                             except TypeError:
