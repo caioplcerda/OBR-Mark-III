@@ -1,21 +1,11 @@
 # main.py
-# Segue-linha robusto p/ LINHA GROSSA + robô rápido com feedback por LEDs:
-# - multi-ROI (faixas) + regressão -> ângulo
-# - interseção TOP-first (antecipa cruzamento), com debounce independente
-# - distinção Interseção x Curva 90° (bimodalidade + deslocamento + ângulo)
-# - gaps (jumps): extrapola base por alguns frames (sem "linha perdida")
-# - ignora 15% laterais (evita paralelas nas bordas)
-# - verdes (ROI + forma) com debounce; ações: left/right/straight/uturn
-# - segue reto um tempinho ao perder linha (grace)
-# - Botão físico em BCM 21 (toggle start/stop)
-# - LEDs: 7 LEDs (módulo) SEMPRE branco forte; barras de 4 exibem status
-#
-# Rode:  python3 main.py   e abra http://<ip>:5000/
+# Segue-linha + UI web + botão físico (BCM21 ou BCM4) para START/STOP.
+# Mantém STBY como está no hardware_control (você disse que já fica em HIGH).
 
 import os
 import cv2
-import json
 import time
+import json
 import threading
 import numpy as np
 from datetime import datetime
@@ -41,7 +31,7 @@ try:
 except Exception:
     WEB_AVAILABLE = False
 
-# ==== Botão físico (opcional) ====
+# ==== GPIO (opcional) ====
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
@@ -51,13 +41,12 @@ try:
 except Exception:
     GPIO_AVAILABLE = False
 
-BUTTON_PIN = 21                 # Botão físico (pino 40) — não conflita com 17/27 do driver
-REQUIRE_BUTTON_TO_START = True  # True: só inicia via botão físico ou via UI
+# Tentamos botão em BCM21; se não der, tentamos BCM4 (muito comum)
+CANDIDATE_BUTTON_PINS = [21, 4]
 
-# ==== Dependências de projeto ====
 from hardware_control import HardwareControl
 from vision import Vision
-from led_control import LedController  # <-- LEDs WS2812 (15 LEDs total: 4+4+7)
+from led_control import LedController
 
 # ==== Picamera2 (opcional) ====
 PICAMERA_AVAILABLE = False
@@ -85,7 +74,7 @@ def log(msg: str):
 
 
 class Camera:
-    """Picamera2 (preferido) ou USB; frame final em BGR; 180° por padrão."""
+    """Picamera2 ou USB; entrega BGR; aplica rotate_180 se necessário."""
     def __init__(self, width=640, height=480, rotate_180=True):
         self.width = width
         self.height = height
@@ -142,46 +131,32 @@ class Camera:
 
 
 class Robot:
-    """Segue-linha com interseções/curva90 e verdes robustos; TOP-first; gaps; bordas ignoradas."""
     WIDTH = 640
     HEIGHT = 480
 
-    # Controle
     BASE_SPEED = 55
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
-    # Multi-ROI (faixas)
     N_STRIPS = 8
     STRIP_H = 22
     STRIP_BOTTOM = 440
 
-    # Binarização/morfologia
     BIN_BLUR = 3
     ADAPT_BLOCK = 21
     ADAPT_C = 7
     MORPH = 3
 
-    # Cortar 15% laterais (evita paralelas nas bordas)
     SIDE_MARGIN_FRACTION = 0.15  # 15%
 
-    # Interseção (linha grossa) + debounce
     INTERSECTION_WIDTH_PX = 180
     INTERSECT_DEBOUNCE = 2
-
-    # Interseção "TOP-first" (antecipa)
-    INTERSECT_AHEAD_DEBOUNCE = 2  # frames
-
-    # Verdes (debounce)
+    INTERSECT_AHEAD_DEBOUNCE = 2
     GREEN_DEBOUNCE = 2
 
-    # Jumps (gaps) – extrapola base por alguns frames
     MAX_GAP_FRAMES = 8
-
-    # “Perdeu a linha → segue reto” por alguns frames
     LINE_LOSS_GRACE_FRAMES = 12
 
-    # PID defaults (para hardware_control)
     PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
 
     def __init__(self):
@@ -192,37 +167,31 @@ class Robot:
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
-        # LEDs (7 sempre branco forte, 4+4 mostram status)
+        # LEDs
         try:
-            self.leds = LedController(pin=12, brightness=150)  # GPIO12 (DIN)
+            self.leds = LedController(pin=12, brightness=150)  # WS2812 (DIN em GPIO12)
             if self.leds and self.leds.enabled:
-                self.leds.status_ok_idle()  # aplica base: 7 branco, 4+4 branco fraco
+                self.leds.status_ok_idle()
         except Exception as e:
             self.leds = None
             log(f"LEDs desabilitados: {e}")
 
         self.history = deque(maxlen=5)
-
-        # buffers/estado
         self._intersect_seen = 0
         self._intersect_ahead_seen = 0
         self._green_seen = 0
         self._green_last = None
-        self.planned_direction = None    # "left"|"right"|"straight"|"uturn"|None
+        self.planned_direction = None
         self.turning_until = 0.0
+        self._gap_frames_left = 0
+        self._line_loss_grace = 0
 
-        self._gap_frames_left = 0        # extrapolação da base
-        self._line_loss_grace = 0        # seguir reto mesmo sem base
-
-        # config persistente
         self.cfg_path = "config.json"
         self._load_config_if_any()
 
-        # FPS
         self._last_ts = time.time()
         self._frames = 0
 
-        # margens laterais em px
         self.LEFT_CROP = int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
         self.RIGHT_CROP = self.WIDTH - int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
 
@@ -236,10 +205,8 @@ class Robot:
         self.thread.start()
         SHARED_STATE["status"] = "running"
         if getattr(self, "leds", None):
-            try:
-                self.leds.status_ok()  # azul fraco nas barras de 4
-            except Exception:
-                pass
+            try: self.leds.status_ok()
+            except Exception: pass
         log("Loop principal iniciado.")
 
     def stop(self):
@@ -251,7 +218,7 @@ class Robot:
             pass
         if getattr(self, "leds", None):
             try:
-                self.leds.status_lost()  # vermelho rápido nas barras
+                self.leds.status_lost()
                 self.leds.status_ok_idle()
             except Exception:
                 pass
@@ -265,10 +232,8 @@ class Robot:
             pass
         self.camera.release()
         if getattr(self, "leds", None):
-            try:
-                self.leds.cleanup()
-            except Exception:
-                pass
+            try: self.leds.cleanup()
+            except Exception: pass
         log("Recursos liberados.")
 
     # ===== UI =====
@@ -329,13 +294,13 @@ class Robot:
     # ===== motores =====
     def _drive(self, base_speed: float, error: float):
         try:
-            self.hardware.set_motor_speed(base_speed, error)  # (base, erro)
+            self.hardware.set_motor_speed(base_speed, error)
         except TypeError:
             left = int(max(-100, min(100, base_speed - error)))
             right = int(max(-100, min(100, base_speed + error)))
             self.hardware.set_motor_speed(left, right)
 
-    # ===== visão: binário/centróides (com corte lateral) =====
+    # ===== visão =====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if self.BIN_BLUR > 1:
@@ -347,18 +312,16 @@ class Robot:
         if self.MORPH > 0:
             k = cv2.getStructuringElement(cv2.MORPH_RECT, (self.MORPH, self.MORPH))
             bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k, iterations=1)
-        # zera 15% laterais para ignorar paralelas de borda
         bw[:, :self.LEFT_CROP] = 0
         bw[:, self.RIGHT_CROP:] = 0
-        return bw  # 255 = linha; 0 = fundo
+        return bw
 
     def _strip_centroid(self, bw, y0, h):
         H, W = bw.shape[:2]
         y0 = max(0, min(H - 1, int(y0)))
         y1 = max(0, min(H, int(y0 + h)))
-        # aplica corte lateral
         roi = bw[y0:y1, self.LEFT_CROP:self.RIGHT_CROP]
-        colsum = roi.sum(axis=0)  # 255 por pixel ligado
+        colsum = roi.sum(axis=0)
         if colsum.max() < 255 * h * 0.05:
             return None, 0
         x = np.arange(self.LEFT_CROP, self.RIGHT_CROP, dtype=np.float32)
@@ -368,7 +331,6 @@ class Robot:
         width_est = int(np.count_nonzero(center_band))
         return (int(cx), int(cy)), width_est
 
-    # ===== regressão =====
     def _fit_angle(self, pts):
         if len(pts) < 2:
             return 0.0
@@ -379,7 +341,6 @@ class Robot:
         angle_deg = np.degrees(np.arctan2(alpha, 1.0))
         return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
 
-    # ===== perfis/bimodalidade p/ 90° x interseção =====
     def _strip_profile(self, bw, y0, h):
         H, W = bw.shape[:2]
         y0 = max(0, min(H - 1, int(y0)))
@@ -387,7 +348,7 @@ class Robot:
         roi = bw[y0:y1, self.LEFT_CROP:self.RIGHT_CROP]
         colsum = roi.sum(axis=0).astype(np.float32)
         if colsum.max() > 0:
-            colsum /= (255.0 * h)  # normaliza [0,1]
+            colsum /= (255.0 * h)
         return colsum
 
     def _is_bimodal(self, profile, min_sep_px=60, min_peak=0.15):
@@ -432,44 +393,34 @@ class Robot:
         return is_intersection, is_curve90
 
     def _detect_intersection(self, bw, widths, cents, angle_deg):
-        # NOW (perto da base)
         is_now, is_c90_now = self._detect_intersection_core(bw, widths, cents, angle_deg, idx_bottom=0, idx_mid=2)
-        # AHEAD (lá no topo)
         top = self.N_STRIPS - 1
         mid_top = max(0, top - 2)
         is_ahead, _ = self._detect_intersection_core(bw, widths, cents, angle_deg, idx_bottom=mid_top, idx_mid=top)
         return is_now, is_c90_now, is_ahead
 
-    # ===== preview =====
     def _draw_preview(self, frame, bw, cents, fit_angle, look_point, is_intersection, is_curve90, is_ahead, green_dir):
         out = frame.copy()
 
-        # linha-base
         y_base = int(self.STRIP_BOTTOM)
         cv2.line(out, (0, y_base), (self.WIDTH-1, y_base), (0, 0, 255), 2)
-
-        # zonas de corte lateral (só pra visualizar)
         cv2.rectangle(out, (0, 0), (self.LEFT_CROP, self.HEIGHT-1), (40, 40, 40), 1)
         cv2.rectangle(out, (self.RIGHT_CROP, 0), (self.WIDTH-1, self.HEIGHT-1), (40, 40, 40), 1)
 
-        # faixas + centróides
         for i, c in enumerate(cents):
             y0 = int(self.STRIP_BOTTOM - i*self.STRIP_H)
             cv2.rectangle(out, (self.LEFT_CROP, y0), (self.RIGHT_CROP-1, y0 + self.STRIP_H), (80, 80, 80), 1)
             if c is not None:
                 cv2.circle(out, (int(c[0]), int(c[1])), 6, (0, 200, 0), -1, cv2.LINE_AA)
 
-        # linha ajustada
         valids = [c for c in cents if c is not None]
         if len(valids) >= 2:
             pA, pB = valids[0], valids[-1]
             cv2.line(out, (int(pA[0]), int(pA[1])), (int(pB[0]), int(pB[1])), (255, 0, 0), 2, cv2.LINE_AA)
 
-        # look-ahead
         if look_point is not None:
             cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
 
-        # texto
         txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
         if is_intersection: txt += "  INT"
         if is_curve90: txt += "  C90"
@@ -479,14 +430,12 @@ class Robot:
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
         return out
 
-    # ===== loop principal =====
     def _loop(self):
         try:
             while self.running:
                 frame = self.camera.read()
                 bw = self._binarize(frame)
 
-                # centróides + larguras
                 cents, widths = [], []
                 for i in range(self.N_STRIPS):
                     y0 = self.STRIP_BOTTOM - i*self.STRIP_H
@@ -494,12 +443,10 @@ class Robot:
                     cents.append(c)
                     widths.append(w)
 
-                # --- TOP-first interseção / curva90 ---
                 valids = [p for p in cents if p is not None]
                 angle = self._fit_angle(valids)
                 is_intersection, is_curve90, is_ahead = self._detect_intersection(bw, widths, cents, angle)
 
-                # debounce AHEAD (aviso/planejamento)
                 if is_ahead:
                     self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
                 else:
@@ -507,17 +454,13 @@ class Robot:
                 confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
                 if getattr(self, "leds", None):
                     try:
-                        if confirmed_ahead:
-                            self.leds.status_ahead()     # amarelo nas barras de 4
-                        else:
-                            self.leds.status_ok()        # azul fraco nas barras
+                        if confirmed_ahead: self.leds.status_ahead()
+                        else:               self.leds.status_ok()
                     except Exception:
                         pass
 
-                # --- centróide base (com gaps e grace) ---
                 c0 = cents[0]
                 if c0 is None:
-                    # GAP: base sumiu, mas há pontos acima?
                     upper = [p for p in cents[1:] if p is not None]
                     if upper and (self._gap_frames_left < self.MAX_GAP_FRAMES):
                         steps = 1
@@ -527,7 +470,6 @@ class Robot:
                         self._gap_frames_left += 1
                         self._line_loss_grace = 0
                     else:
-                        # segue reto por alguns frames (grace)
                         if self._line_loss_grace < self.LINE_LOSS_GRACE_FRAMES:
                             self._line_loss_grace += 1
                             self._drive(self.BASE_SPEED, 0.0)
@@ -537,7 +479,6 @@ class Robot:
                             self._publish(out, f"Linha sumiu — seguindo reto ({self._line_loss_grace}/{self.LINE_LOSS_GRACE_FRAMES})")
                             time.sleep(0.003)
                             continue
-                        # realmente perdido
                         self._gap_frames_left = 0
                         self._line_loss_grace = 0
                         if getattr(self, "leds", None):
@@ -547,39 +488,31 @@ class Robot:
                             except Exception:
                                 pass
                         self._publish(frame, "Linha perdida")
-                        try:
-                            self.hardware.stop()
-                        except Exception:
-                            pass
+                        try: self.hardware.stop()
+                        except Exception: pass
                         time.sleep(0.01)
                         continue
                 else:
-                    # reset se temos base válida
                     self._gap_frames_left = 0
                     self._line_loss_grace = 0
 
                 self.history.append(c0[0])
 
-                # look-ahead ponto
                 steps = 5
                 dx = np.tan(np.radians(angle)) * steps * self.STRIP_H
                 look = (c0[0] + dx, c0[1] - steps*self.STRIP_H)
                 look = (int(np.clip(look[0], 0, self.WIDTH-1)),
                         int(np.clip(look[1], 0, self.HEIGHT-1)))
 
-                # debounce NOW
                 if is_intersection:
                     self._intersect_seen = min(self._intersect_seen + 1, 10)
                 else:
                     self._intersect_seen = 0
                 confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
                 if confirmed_intersection and getattr(self, "leds", None):
-                    try:
-                        self.leds.status_intersection()  # âmbar nas barras
-                    except Exception:
-                        pass
+                    try: self.leds.status_intersection()
+                    except Exception: pass
 
-                # verdes (ROI + forma) + debounce
                 green_centroids, green_dir = self.vision.detect_greens(frame)
                 if green_dir:
                     self._green_last = green_dir
@@ -588,7 +521,6 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # decisões (só aciona interseção quando confirmada e não for curva 90)
                 now = time.time()
                 if confirmed_intersection and not is_curve90:
                     if confirmed_green == "uturn":
@@ -600,10 +532,9 @@ class Robot:
                         timeout = 3.0
                         while time.time() - t0 < timeout and self.running:
                             try:
-                                self.hardware.set_motor_speed(0, 120)  # gira no lugar
+                                self.hardware.set_motor_speed(0, 120)
                             except TypeError:
                                 self.hardware.set_motor_speed(-60, 60)
-                            # reacoplou?
                             re_bw = self._binarize(self.camera.read())
                             c_re, w0_re = self._strip_centroid(re_bw, self.STRIP_BOTTOM, self.STRIP_H)
                             if w0_re > 40 and c_re is not None:
@@ -624,7 +555,6 @@ class Robot:
                         self._green_seen = 0
                         self._intersect_seen = 0
                     else:
-                        # sem marca -> reto curto
                         self.planned_direction = "straight"
                         self.turning_until = now + 0.4
                         if getattr(self, "leds", None):
@@ -632,28 +562,22 @@ class Robot:
                             except Exception: pass
                         log("Interseção sem marca — seguindo reto.")
 
-                # erro = offset + MIX*angle (+ viés)
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
 
-                # viés temporário de curva
                 if self.planned_direction and now < self.turning_until:
                     bias = 120 if self.planned_direction == "left" else (-120 if self.planned_direction == "right" else 0)
                     error += bias
                 elif self.planned_direction and now >= self.turning_until:
                     self.planned_direction = None
 
-                # drive
                 self._drive(self.BASE_SPEED, error)
 
-                # preview
                 out = frame
                 if SHARED_STATE.get("view_mode") == "preview":
                     out = self._draw_preview(frame, bw, cents, angle, look, confirmed_intersection, is_curve90, confirmed_ahead, confirmed_green)
 
-                # publica
                 self._publish(out, "OK")
-
                 time.sleep(0.003)
 
         except KeyboardInterrupt:
@@ -661,10 +585,8 @@ class Robot:
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
-            try:
-                self.hardware.stop()
-            except Exception:
-                pass
+            try: self.hardware.stop()
+            except Exception: pass
 
     def _publish(self, frame, status_msg):
         left = getattr(self.hardware, "last_left_speed", 0)
@@ -673,7 +595,6 @@ class Robot:
         SHARED_STATE["speeds"] = {"left": left, "right": right}
         SHARED_STATE["status"] = status_msg
 
-        # FPS a cada ~2s
         self._frames += 1
         now = time.time()
         if now - getattr(self, "_last_ts", now) >= 2.0:
@@ -684,7 +605,7 @@ class Robot:
             log(f"Status: {status_msg} | FPS ~ {fps:.1f} | L/R: {left}/{right}")
 
 
-# ==== integração com web ====
+# ==== WEB / comandos ====
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
         return
@@ -720,50 +641,72 @@ def _wire_web(robot: Robot):
         log(f"Falha ao integrar com web_stream: {e}")
 
 
+# ==== Botão físico (tenta BCM21 e BCM4) ====
 def _setup_button(robot: Robot):
-    """Registra o botão físico em BCM 21, com checagem de conflito com pinos do HardwareControl."""
     if not GPIO_AVAILABLE:
         log("GPIO indisponível: iniciando sem botão físico.")
         return
 
-    # tenta detectar conflito com pinos do HardwareControl
-    used = set()
-    try:
-        hc = robot.hardware
-        used.update([
-            getattr(hc, "L_BIN1", None), getattr(hc, "L_BIN2", None), getattr(hc, "L_PWMB", None),
-            getattr(hc, "R_BIN1", None), getattr(hc, "R_BIN2", None), getattr(hc, "R_PWMB", None),
-            getattr(hc, "STBY", None),
-            getattr(hc, "START_BUTTON", None),
-            getattr(hc, "ENCODER_A_L", None), getattr(hc, "ENCODER_B_L", None),
-            getattr(hc, "ENCODER_A_R", None), getattr(hc, "ENCODER_B_R", None),
-        ])
-        used = {p for p in used if isinstance(p, int)}
-    except Exception:
-        used = set()
+    configured = False
+    chosen_pin = None
 
-    if BUTTON_PIN in used:
-        log(f"Botão físico DESATIVADO: BCM {BUTTON_PIN} conflita com pinos do HardwareControl: {sorted(used)}")
+    for pin in CANDIDATE_BUTTON_PINS:
+        try:
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            # limpa eventos prévios (se já havia teste)
+            try:
+                GPIO.remove_event_detect(pin)
+            except Exception:
+                pass
+
+            def _toggle(channel):
+                try:
+                    # debounce por software
+                    time.sleep(0.03)
+                    if GPIO.input(pin) == GPIO.LOW:
+                        if robot.running:
+                            log(f"Botão (BCM {pin}): STOP")
+                            robot.stop()
+                        else:
+                            log(f"Botão (BCM {pin}): START")
+                            robot.start()
+                except Exception as e:
+                    log(f"Erro no botão (BCM {pin}): {e}")
+
+            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
+            configured = True
+            chosen_pin = pin
+            log(f"Botão físico pronto no BCM {pin} (pull-up, FALLING).")
+            break
+        except Exception as e:
+            log(f"Falha ao configurar botão no BCM {pin}: {e}")
+
+    if not configured:
+        log("Nenhum botão configurado (BCM21/4). Siga pela UI/web.")
         return
 
-    try:
-        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-        def _toggle(channel):
+    # Polling de segurança: se o usuário mantiver pressionado na hora errada, ainda detectamos
+    def _safety_poll():
+        last_state = GPIO.input(chosen_pin)
+        while True:
             try:
-                if robot.running:
-                    log("Botão: STOP")
-                    robot.stop()
-                else:
-                    log("Botão: START")
-                    robot.start()
-            except Exception as e:
-                log(f"Erro no botão: {e}")
+                state = GPIO.input(chosen_pin)
+                if state != last_state:
+                    last_state = state
+                    if state == GPIO.LOW:
+                        # espelha a lógica do callback
+                        if robot.running:
+                            log(f"[poll] Botão (BCM {chosen_pin}): STOP")
+                            robot.stop()
+                        else:
+                            log(f"[poll] Botão (BCM {chosen_pin}): START")
+                            robot.start()
+                time.sleep(0.05)
+            except Exception:
+                break
 
-        GPIO.add_event_detect(BUTTON_PIN, GPIO.FALLING, callback=_toggle, bouncetime=350)
-        log(f"Botão físico pronto no BCM {BUTTON_PIN} (pull-up).")
-    except Exception as e:
-        log(f"Falha ao inicializar botão no BCM {BUTTON_PIN}: {e}")
+    th = threading.Thread(target=_safety_poll, daemon=True)
+    th.start()
 
 
 def main():
@@ -776,11 +719,8 @@ def main():
         port = int(os.environ.get("PORT", "5000"))
         log(f"Servidor web em http://{host}:{port}")
 
-        if not REQUIRE_BUTTON_TO_START:
-            log("Iniciando automaticamente (REQUIRE_BUTTON_TO_START=False).")
-            robot.start()
-        else:
-            log("Aguardando botão físico (ou UI) para START...")
+        # Não inicia automaticamente: você usa o botão físico ou o botão da UI.
+        log("Aguardando START (botão físico ou UI/web)...")
 
         try:
             if hasattr(web_stream, "socketio"):
@@ -792,16 +732,11 @@ def main():
         finally:
             robot.cleanup()
             if GPIO_AVAILABLE:
-                try:
-                    GPIO.cleanup()
-                except Exception:
-                    pass
+                try: GPIO.cleanup()
+                except Exception: pass
     else:
-        log("Rodando headless (sem servidor web).")
-        if not REQUIRE_BUTTON_TO_START:
-            robot.start()
-        else:
-            log("Headless aguardando botão físico para START...")
+        log("Rodando sem servidor web.")
+        log("Use o botão físico (se configurado) para START/STOP.")
         try:
             while True:
                 time.sleep(1.0)
@@ -810,10 +745,8 @@ def main():
         finally:
             robot.cleanup()
             if GPIO_AVAILABLE:
-                try:
-                    GPIO.cleanup()
-                except Exception:
-                    pass
+                try: GPIO.cleanup()
+                except Exception: pass
 
 
 if __name__ == "__main__":
