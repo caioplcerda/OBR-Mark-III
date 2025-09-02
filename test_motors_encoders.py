@@ -20,8 +20,8 @@ ENCODER_A_L, ENCODER_B_L = 6, 13
 ENCODER_A_R, ENCODER_B_R = 19, 26
 
 # ===== CONFIG TESTE =====
-DUTY = 50          # % PWM
-WINDOW = 2.0       # segundos cada etapa
+DUTY = 100          # % PWM
+WINDOW = 5.0      # segundos cada etapa
 PAUSE = 0.6        # pausa entre etapas
 
 # ===== CONTADORES =====
