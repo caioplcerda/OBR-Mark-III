@@ -97,9 +97,7 @@ class HardwareControl:
 
         # Encoders (canal A com interrupção)
         self.ENCODER_A_L = 6
-        self.ENCODER_B_L = 13   # disponível se quiser direção no futuro
         self.ENCODER_A_R = 19
-        self.ENCODER_B_R = 26
 
         # Estado dos encoders
         self._ticks_l = 0
