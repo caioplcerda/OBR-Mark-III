@@ -137,7 +137,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    # ====== NOVO: polaridade e "creep" quando perdido ======
+    # ====== polaridade e "creep" quando perdido ======
     # True: linha ESCURA sobre piso claro (preto no branco) → THRESH_BINARY_INV
     # False: linha CLARA sobre piso escuro (branco no preto) → THRESH_BINARY
     LINE_IS_DARK = True
@@ -164,12 +164,11 @@ class Robot:
     # Ignorar 15% laterais (evitar paralelas nas bordas)
     SIDE_MARGIN_FRACTION = 0.15
 
-    # Interseção e debounce    # Interseção e debounce (mais rígido)
-    INTERSECTION_WIDTH_PX = 220      # antes 180
-    INTERSECTION_WIDTH_FRAC = 0.55   # >= 55% da largura útil (cálculo novo abaixo)
-    INTERSECT_DEBOUNCE = 4           # antes 2 (evita piscadas)
-    INTERSECT_AHEAD_DEBOUNCE = 3     # antes 2
-
+    # Interseção e debounce (mais rígido)
+    INTERSECTION_WIDTH_PX = 220
+    INTERSECTION_WIDTH_FRAC = 0.55
+    INTERSECT_DEBOUNCE = 4
+    INTERSECT_AHEAD_DEBOUNCE = 3
 
     # Verdes
     GREEN_DEBOUNCE = 2
@@ -191,7 +190,7 @@ class Robot:
 
         # LEDs
         try:
-            self.leds = LedController(pin=12, brightness=150)  # WS2812 (DIN em GPIO12)
+            self.leds = LedController(pin=12, brightness=150)  # WS2812 (DIN em GPIO12) — opcional
             if self.leds and self.leds.enabled:
                 self.leds.status_ok_idle()  # 7 branco forte, 4+4 branco fraco
         except Exception as e:
@@ -227,8 +226,10 @@ class Robot:
         self.thread.start()
         SHARED_STATE["status"] = "running"
         if getattr(self, "leds", None):
-            try: self.leds.status_ok()     # azul fraco nas barras
-            except Exception: pass
+            try:
+                self.leds.status_ok()     # azul fraco nas barras
+            except Exception:
+                pass
         log("Loop principal iniciado.")
 
     def stop(self):
@@ -254,8 +255,10 @@ class Robot:
             pass
         self.camera.release()
         if getattr(self, "leds", None):
-            try: self.leds.cleanup()
-            except Exception: pass
+            try:
+                self.leds.cleanup()
+            except Exception:
+                pass
         log("Recursos liberados.")
 
     # ===== UI =====
@@ -315,6 +318,8 @@ class Robot:
 
     # ===== motores =====
     def _drive(self, base_speed: float, error: float):
+        """Abstrai o HardwareControl: funciona tanto com set_motor_speed(base, error)
+        quanto com set_motor_speed(left, right) se cair no fallback."""
         try:
             self.hardware.set_motor_speed(base_speed, error)  # API com PID direcional interno
         except TypeError:
@@ -378,51 +383,61 @@ class Robot:
             colsum /= (255.0 * h)
         return colsum
 
-        def _is_bimodal(self, profile, min_sep_px=80, min_peak=0.20):
+    # >>>>>>> CORRIGIDO: este método estava indentado errado no seu arquivo <<<<<<<
+    def _is_bimodal(self, profile, min_sep_px=80, min_peak=0.20):
         p = profile
         if p is None or len(p) < 7:
             return False
         # suaviza
-        k = max(7, (len(p)//80)*2+1)
-        ker = np.ones(k, np.float32)/k
+        k = max(7, (len(p) // 80) * 2 + 1)
+        ker = np.ones(k, np.float32) / k
         ps = np.convolve(p, ker, mode="same")
 
         # acha "picos" locais
         peaks = []
-        for i in range(2, len(ps)-2):
-            if ps[i] > ps[i-1] and ps[i] > ps[i+1] and ps[i] >= min_peak:
+        for i in range(2, len(ps) - 2):
+            if ps[i] > ps[i - 1] and ps[i] > ps[i + 1] and ps[i] >= min_peak:
                 peaks.append(i)
         if len(peaks) < 2:
             return False
 
         # maior separação entre dois picos
-        sep = max(peaks[j]-peaks[i] for i in range(len(peaks)) for j in range(i+1, len(peaks)))
+        sep = max(peaks[j] - peaks[i] for i in range(len(peaks)) for j in range(i + 1, len(peaks)))
         return sep >= min_sep_px
 
-
     def _detect_intersection_core(self, bw, widths, cents, angle_deg, idx_bottom=0, idx_mid=2):
-        yb = self.STRIP_BOTTOM - idx_bottom*self.STRIP_H
-        ym = self.STRIP_BOTTOM - idx_mid*self.STRIP_H
+        yb = self.STRIP_BOTTOM - idx_bottom * self.STRIP_H
+        ym = self.STRIP_BOTTOM - idx_mid * self.STRIP_H
         prof_bottom = self._strip_profile(bw, yb, self.STRIP_H)
         prof_mid = self._strip_profile(bw, ym, self.STRIP_H)
 
-        bimodal_bottom = self._is_bimodal(prof_bottom, min_sep_px=70, min_peak=0.16)
-        bimodal_mid = self._is_bimodal(prof_mid, min_sep_px=60, min_peak=0.14)
+        # critérios mais conservadores
+        bimodal_bottom = self._is_bimodal(prof_bottom, min_sep_px=90, min_peak=0.22)
+        bimodal_mid = self._is_bimodal(prof_mid, min_sep_px=70, min_peak=0.18)
 
+        # largura absoluta e relativa dentro do ROI útil
+        roi_width = (self.RIGHT_CROP - self.LEFT_CROP)
         w_bottom = widths[idx_bottom] if idx_bottom < len(widths) else 0
         w_mid = widths[idx_mid] if idx_mid < len(widths) else 0
-        wide_bottom = w_bottom >= self.INTERSECTION_WIDTH_PX
-        wide_mid = w_mid >= self.INTERSECTION_WIDTH_PX * 0.85
+        wide_bottom_abs = w_bottom >= self.INTERSECTION_WIDTH_PX
+        wide_mid_abs = w_mid >= int(self.INTERSECTION_WIDTH_PX * 0.90)
+        wide_bottom_rel = (w_bottom / max(1, roi_width)) >= self.INTERSECTION_WIDTH_FRAC
+        wide_mid_rel = (w_mid / max(1, roi_width)) >= (self.INTERSECTION_WIDTH_FRAC * 0.9)
 
+        # diferença de centro (curva de 90 costuma deslocar muito)
         dx = 0.0
-        up = idx_mid
-        if up < len(cents) and cents[idx_bottom] and cents[up]:
-            dx = float(cents[idx_bottom][0] - cents[up][0])
-        big_shift = abs(dx) >= 90
-        ang_high = abs(angle_deg) >= 28.0
+        if cents[idx_bottom] and idx_mid < len(cents) and cents[idx_mid]:
+            dx = float(cents[idx_bottom][0] - cents[idx_mid][0])
+        big_shift = abs(dx) >= 95
+        ang_high = abs(angle_deg) >= 26.0
 
-        is_intersection = (bimodal_bottom or bimodal_mid) or (wide_bottom and wide_mid and not (ang_high and big_shift))
+        strong_wide = (wide_bottom_abs and wide_mid_abs) and (wide_bottom_rel and wide_mid_rel)
+        is_intersection = (bimodal_bottom and bimodal_mid) or (strong_wide and not (ang_high and big_shift))
         is_curve90 = (ang_high and big_shift) and not (bimodal_bottom or bimodal_mid)
+
+        if is_intersection and abs(dx) > 110 and not (bimodal_bottom and bimodal_mid):
+            is_intersection = False
+
         return is_intersection, is_curve90
 
     def _detect_intersection(self, bw, widths, cents, angle_deg):
@@ -436,13 +451,13 @@ class Robot:
         out = frame.copy()
 
         y_base = int(self.STRIP_BOTTOM)
-        cv2.line(out, (0, y_base), (self.WIDTH-1, y_base), (0, 0, 255), 2)
-        cv2.rectangle(out, (0, 0), (self.LEFT_CROP, self.HEIGHT-1), (40, 40, 40), 1)
-        cv2.rectangle(out, (self.RIGHT_CROP, 0), (self.WIDTH-1, self.HEIGHT-1), (40, 40, 40), 1)
+        cv2.line(out, (0, y_base), (self.WIDTH - 1, y_base), (0, 0, 255), 2)
+        cv2.rectangle(out, (0, 0), (self.LEFT_CROP, self.HEIGHT - 1), (40, 40, 40), 1)
+        cv2.rectangle(out, (self.RIGHT_CROP, 0), (self.WIDTH - 1, self.HEIGHT - 1), (40, 40, 40), 1)
 
         for i, c in enumerate(cents):
-            y0 = int(self.STRIP_BOTTOM - i*self.STRIP_H)
-            cv2.rectangle(out, (self.LEFT_CROP, y0), (self.RIGHT_CROP-1, y0 + self.STRIP_H), (80, 80, 80), 1)
+            y0 = int(self.STRIP_BOTTOM - i * self.STRIP_H)
+            cv2.rectangle(out, (self.LEFT_CROP, y0), (self.RIGHT_CROP - 1, y0 + self.STRIP_H), (80, 80, 80), 1)
             if c is not None:
                 cv2.circle(out, (int(c[0]), int(c[1])), 6, (0, 200, 0), -1, cv2.LINE_AA)
 
@@ -455,12 +470,16 @@ class Robot:
             cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
 
         txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
-        if is_intersection: txt += "  INT"
-        if is_curve90: txt += "  C90"
-        if is_ahead: txt += "  AHEAD"
-        if green_dir: txt += f"  GREEN:{green_dir}"
-        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
-        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+        if is_intersection:
+            txt += "  INT"
+        if is_curve90:
+            txt += "  C90"
+        if is_ahead:
+            txt += "  AHEAD"
+        if green_dir:
+            txt += f"  GREEN:{green_dir}"
+        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
         return out
 
     # ===== loop principal =====
@@ -473,7 +492,7 @@ class Robot:
                 # centróides + larguras nas faixas
                 cents, widths = [], []
                 for i in range(self.N_STRIPS):
-                    y0 = self.STRIP_BOTTOM - i*self.STRIP_H
+                    y0 = self.STRIP_BOTTOM - i * self.STRIP_H
                     c, w = self._strip_centroid(bw, y0, self.STRIP_H)
                     cents.append(c)
                     widths.append(w)
@@ -484,8 +503,10 @@ class Robot:
                 is_intersection, is_curve90, is_ahead = self._detect_intersection(bw, widths, cents, angle)
 
                 # AHEAD debounce -> LEDs
-                if is_ahead: self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
-                else:        self._intersect_ahead_seen = 0
+                if is_ahead:
+                    self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
+                else:
+                    self._intersect_ahead_seen = 0
                 confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
                 if getattr(self, "leds", None):
                     try:
@@ -499,9 +520,9 @@ class Robot:
                     upper = [p for p in cents[1:] if p is not None]
                     if upper and (self._gap_frames_left < self.MAX_GAP_FRAMES):
                         steps = 1
-                        est_x = (upper[0][0] + np.tan(np.radians(angle)) * steps * self.STRIP_H) if angle is not None else (self.history[-1] if self.history else self.WIDTH//2)
-                        est_x = int(np.clip(est_x, self.LEFT_CROP, self.RIGHT_CROP-1))
-                        c0 = (est_x, int(self.STRIP_BOTTOM + self.STRIP_H//2))
+                        est_x = (upper[0][0] + np.tan(np.radians(angle)) * steps * self.STRIP_H) if angle is not None else (self.history[-1] if self.history else self.WIDTH // 2)
+                        est_x = int(np.clip(est_x, self.LEFT_CROP, self.RIGHT_CROP - 1))
+                        c0 = (est_x, int(self.STRIP_BOTTOM + self.STRIP_H // 2))
                         self._gap_frames_left += 1
                         self._line_loss_grace = 0
                     else:
@@ -516,7 +537,7 @@ class Robot:
                             time.sleep(0.003)
                             continue
 
-                        # ====== NOVO: realmente perdido → CREEP ao invés de parar ======
+                        # realmente perdido → CREEP ao invés de parar
                         self._gap_frames_left = 0
                         if self.CREEP_WHEN_LOST:
                             self._drive(self.CREEP_SPEED, 0.0)
@@ -538,8 +559,10 @@ class Robot:
                                 except Exception:
                                     pass
                             self._publish(frame, "Linha perdida — parando")
-                            try: self.hardware.stop()
-                            except Exception: pass
+                            try:
+                                self.hardware.stop()
+                            except Exception:
+                                pass
                             time.sleep(0.01)
                             continue
                 else:
@@ -551,17 +574,21 @@ class Robot:
                 # look-ahead
                 steps = 5
                 dx = np.tan(np.radians(angle)) * steps * self.STRIP_H
-                look = (c0[0] + dx, c0[1] - steps*self.STRIP_H)
-                look = (int(np.clip(look[0], 0, self.WIDTH-1)),
-                        int(np.clip(look[1], 0, self.HEIGHT-1)))
+                look = (c0[0] + dx, c0[1] - steps * self.STRIP_H)
+                look = (int(np.clip(look[0], 0, self.WIDTH - 1)),
+                        int(np.clip(look[1], 0, self.HEIGHT - 1)))
 
                 # interseção atual (debounce) -> LEDs
-                if is_intersection: self._intersect_seen = min(self._intersect_seen + 1, 10)
-                else:               self._intersect_seen = 0
+                if is_intersection:
+                    self._intersect_seen = min(self._intersect_seen + 1, 10)
+                else:
+                    self._intersect_seen = 0
                 confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
                 if confirmed_intersection and getattr(self, "leds", None):
-                    try: self.leds.status_intersection()
-                    except Exception: pass
+                    try:
+                        self.leds.status_intersection()
+                    except Exception:
+                        pass
 
                 # verdes
                 green_centroids, green_dir = self.vision.detect_greens(frame)
@@ -578,8 +605,10 @@ class Robot:
                     if confirmed_green == "uturn":
                         log("UTURN: dois verdes — retornando até reacoplar.")
                         if getattr(self, "leds", None):
-                            try: self.leds.status_turn("uturn")
-                            except Exception: pass
+                            try:
+                                self.leds.status_turn("uturn")
+                            except Exception:
+                                pass
                         t0 = time.time()
                         timeout = 3.0
                         while time.time() - t0 < timeout and self.running:
@@ -601,8 +630,10 @@ class Robot:
                         self.planned_direction = confirmed_green
                         self.turning_until = now + 0.7
                         if getattr(self, "leds", None):
-                            try: self.leds.status_turn(confirmed_green)
-                            except Exception: pass
+                            try:
+                                self.leds.status_turn(confirmed_green)
+                            except Exception:
+                                pass
                         log(f"Curva {confirmed_green} marcada — viés por 0.7s.")
                         self._green_seen = 0
                         self._intersect_seen = 0
@@ -610,8 +641,10 @@ class Robot:
                         self.planned_direction = "straight"
                         self.turning_until = now + 0.4
                         if getattr(self, "leds", None):
-                            try: self.leds.status_following()
-                            except Exception: pass
+                            try:
+                                self.leds.status_following()
+                            except Exception:
+                                pass
                         log("Interseção sem marca — seguindo reto.")
 
                 # erro de direção
@@ -642,8 +675,10 @@ class Robot:
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
-            try: self.hardware.stop()
-            except Exception: pass
+            try:
+                self.hardware.stop()
+            except Exception:
+                pass
 
     def _publish(self, frame, status_msg):
         left = getattr(self.hardware, "last_left_speed", 0)
@@ -785,8 +820,10 @@ def main():
         finally:
             robot.cleanup()
             if GPIO_AVAILABLE:
-                try: GPIO.cleanup()
-                except Exception: pass
+                try:
+                    GPIO.cleanup()
+                except Exception:
+                    pass
     else:
         log("Rodando sem servidor web.")
         log("Use o botão físico (se configurado) para START/STOP.")
@@ -798,8 +835,10 @@ def main():
         finally:
             robot.cleanup()
             if GPIO_AVAILABLE:
-                try: GPIO.cleanup()
-                except Exception: pass
+                try:
+                    GPIO.cleanup()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
