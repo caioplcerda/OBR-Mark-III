@@ -175,7 +175,7 @@ class Robot:
         self.running = False
         self.thread = None
 
-        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)  # <<< 180°
+        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=False)  # <<< 180°
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
