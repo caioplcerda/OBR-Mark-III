@@ -173,7 +173,7 @@ class HardwareControl:
     """
 
     # ---- Ajustes principais ----
-    MIN_DUTY = 60.0          # deadband para vencer inércia
+    MIN_DUTY = 80.0          # deadband para vencer inércia
     OPEN_LOOP = True         # por padrão, PWM direto
     AUTO_FALLBACK_OPEN = True
     FALLBACK_CHECK_SEC = 0.7
