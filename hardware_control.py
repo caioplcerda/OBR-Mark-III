@@ -445,7 +445,7 @@ class HardwareControl:
             self.GPIO.output(self.L_BIN2, 1)
         self._pwm_left.ChangeDutyCycle(abs(left_cmd))
 
-        # Direita (mesma convenção do seu teste_v2)
+        # Direita (mesma lógica da esquerda — SEM inversão!)
         if right_cmd >= 0:
             self.GPIO.output(self.R_BIN1, 1)
             self.GPIO.output(self.R_BIN2, 0)
