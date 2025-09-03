@@ -1,16 +1,18 @@
 # hardware_control.py
-# Open-loop por padrão (reto robusto) e fallback RPi.GPIO -> lgpio.
+# Open-loop por padrão (reto robusto) e backend forçado em lgpio (PWM por hardware).
 # Ajustes:
-# - Nenhuma inversão: mesma lógica BIN1/BIN2 em ambas as rodas.
-# - Deadband 60% para arrancada.
-# - Snap-to-straight (erro pequeno => 70/70).
+# - Direita invertida (chassi espelhado): INVERT_RIGHT = True
+# - Deadband 55% para arrancada.
+# - Snap-to-straight (erro pequeno => 80/80).
 # - Encoders opcionais. TICKS_PER_REV = 36.
+# - PWM 500 Hz (mais torque).
+# - Sem dependência de RPi.GPIO (mas mantém fallback helpers).
 
 import time
 import threading
 
 # =========================
-#   Backends GPIO (RPi.GPIO -> lgpio fallback)
+#   Backends GPIO (RPi.GPIO -> lgpio; aqui forçamos lgpio)
 # =========================
 class _PWMBase:
     def start(self, duty): raise NotImplementedError
@@ -29,46 +31,6 @@ class _GPIOBackendBase:
     def add_event_detect(self, pin, edge, callback): raise NotImplementedError
     def remove_event_detect(self, pin): pass
     def cleanup(self): pass
-
-class _RPiGPIOBackend(_GPIOBackendBase):
-    def __init__(self):
-        import RPi.GPIO as GPIO
-        self._GPIO = GPIO
-        self._GPIO.setwarnings(False)
-        self._GPIO.setmode(self._GPIO.BCM)
-        self.OUT = self._GPIO.OUT
-        self.IN = self._GPIO.IN
-        self.PUD_UP = self._GPIO.PUD_UP
-        self.RISING = self._GPIO.RISING
-    def setup(self, pin, mode, pull_up_down=None):
-        if pull_up_down is None:
-            self._GPIO.setup(pin, mode)
-        else:
-            self._GPIO.setup(pin, mode, pull_up_down=pull_up_down)
-    def output(self, pin, level):
-        self._GPIO.output(pin, self._GPIO.HIGH if level else self._GPIO.LOW)
-    def input(self, pin):
-        return self._GPIO.input(pin)
-    class _PWM(_PWMBase):
-        def __init__(self, GPIO, pin, freq):
-            self._pwm = GPIO.PWM(pin, freq)
-        def start(self, duty):
-            self._pwm.start(max(0.0, min(100.0, float(duty))))
-        def ChangeDutyCycle(self, duty):
-            self._pwm.ChangeDutyCycle(max(0.0, min(100.0, float(duty))))
-        def stop(self):
-            try: self._pwm.stop()
-            except Exception: pass
-    def PWM(self, pin, freq_hz):
-        return self._PWM(self._GPIO, pin, freq_hz)
-    def add_event_detect(self, pin, edge, callback):
-        self._GPIO.add_event_detect(pin, edge, callback=callback)
-    def remove_event_detect(self, pin):
-        try: self._GPIO.remove_event_detect(pin)
-        except Exception: pass
-    def cleanup(self):
-        try: self._GPIO.cleanup()
-        except Exception: pass
 
 class _LGPIOBackend(_GPIOBackendBase):
     def __init__(self, chip_index=0):
@@ -132,13 +94,7 @@ class _LGPIOBackend(_GPIOBackendBase):
         except Exception:
             pass
 
-_BASE_ERR = "Cannot determine SOC peripheral base address"
-def _make_backend(prefer="rpi"):
-    if prefer == "rpi":
-        try:
-            return _RPiGPIOBackend(), "rpi"
-        except Exception:
-            pass
+def _make_backend_forced_lgpio():
     return _LGPIOBackend(), "lgpio"
 
 # =========================
@@ -173,18 +129,18 @@ class HardwareControl:
     """
 
     # ---- Ajustes principais ----
-    MIN_DUTY = 80.0          # deadband para vencer inércia
-    OPEN_LOOP = True         # por padrão, PWM direto
+    MIN_DUTY = 55.0          # deadband para vencer inércia
+    OPEN_LOOP = True         # por padrão, PWM direto (encoder não fecha malha)
     AUTO_FALLBACK_OPEN = True
     FALLBACK_CHECK_SEC = 0.7
 
-    # Snap-to-straight: quando o erro for pequeno, força 70/70
+    # Snap-to-straight: quando o erro for pequeno, força 80/80
     STRAIGHT_ERR_TH = 12.0
     STRAIGHT_MATCH_DELTA = 10.0
-    STRAIGHT_MIN_DUTY = 70.0
+    STRAIGHT_MIN_DUTY = 80.0
 
     # Encoders
-    TICKS_PER_REV = 36      # <<<<< conforme pedido
+    TICKS_PER_REV = 36
     MAX_TICKS_PER_SEC = 300.0
     CONTROL_HZ = 50
     VEL_PID_L = dict(kp=0.25, ki=0.35, kd=0.0, sample_time=1.0/CONTROL_HZ)
@@ -204,9 +160,14 @@ class HardwareControl:
     ENCODER_A_L, ENCODER_B_L = 6, 13
     ENCODER_A_R, ENCODER_B_R = 19, 26
 
+    # Inversões (chassi espelhado)
+    INVERT_LEFT  = False
+    INVERT_RIGHT = True  # direita invertida
+
     def __init__(self, config):
         self.config = config or {}
-        self.GPIO, self.backend = _make_backend("rpi")
+        # Força backend lgpio (imune ao bloqueio do rpi_ws281x)
+        self.GPIO, self.backend = _make_backend_forced_lgpio()
 
         # estado
         self._ticks_l = 0; self._ticks_r = 0
@@ -229,7 +190,7 @@ class HardwareControl:
         self.pid_vel_l = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_L)
         self.pid_vel_r = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_R)
 
-        self._init_servos()  # <<< Faltava este método
+        self._init_servos()
 
         self._last_meas_t = time.time()
         self._last_ticks_l = 0; self._last_ticks_r = 0
@@ -240,48 +201,30 @@ class HardwareControl:
         self._ctrl_th.start()
 
     # ---------- backend helpers ----------
-    def _switch_to_lgpio(self):
-        try: self.GPIO.cleanup()
-        except Exception: pass
-        self.GPIO, self.backend = _make_backend("lgpio")
-
     def _safe_setup_io(self):
-        def base_setup():
-            # motores
-            for pin in [self.L_BIN1,self.L_BIN2,self.R_BIN1,self.R_BIN2,self.STBY]:
-                self.GPIO.setup(pin, self.GPIO.OUT)
-            self.GPIO.setup(self.L_PWMB, self.GPIO.OUT)
-            self.GPIO.setup(self.R_PWMB, self.GPIO.OUT)
+        # motores
+        for pin in [self.L_BIN1,self.L_BIN2,self.R_BIN1,self.R_BIN2,self.STBY]:
+            self.GPIO.setup(pin, self.GPIO.OUT)
+        self.GPIO.setup(self.L_PWMB, self.GPIO.OUT)
+        self.GPIO.setup(self.R_PWMB, self.GPIO.OUT)
 
-            self._pwm_left = self.GPIO.PWM(self.L_PWMB, 1000)
-            self._pwm_right = self.GPIO.PWM(self.R_PWMB, 1000)
-            self._pwm_left.start(0); self._pwm_right.start(0)
+        # PWM 500 Hz
+        self._pwm_left = self.GPIO.PWM(self.L_PWMB, 500)
+        self._pwm_right = self.GPIO.PWM(self.R_PWMB, 500)
+        self._pwm_left.start(0); self._pwm_right.start(0)
 
-            # STBY alto (no seu hardware já fica ligado; garantimos HIGH)
-            self.GPIO.output(self.STBY, 1)
+        # STBY alto (no seu hardware já fica ligado; garantimos HIGH)
+        self.GPIO.output(self.STBY, 1)
 
-            # encoders (opcionais)
-            try:
-                self.GPIO.setup(self.ENCODER_A_L, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
-                self.GPIO.setup(self.ENCODER_A_R, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
-                self.GPIO.add_event_detect(self.ENCODER_A_L, self.GPIO.RISING, callback=self._enc_l)
-                self.GPIO.add_event_detect(self.ENCODER_A_R, self.GPIO.RISING, callback=self._enc_r)
-                self._encoders_ok = True
-            except Exception:
-                self._encoders_ok = False
-
-        # tenta backend atual
+        # encoders (opcionais)
         try:
-            base_setup(); return
-        except RuntimeError as e:
-            if _BASE_ERR in str(e):
-                self._switch_to_lgpio()
-            else:
-                raise
+            self.GPIO.setup(self.ENCODER_A_L, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
+            self.GPIO.setup(self.ENCODER_A_R, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
+            self.GPIO.add_event_detect(self.ENCODER_A_L, self.GPIO.RISING, callback=self._enc_l)
+            self.GPIO.add_event_detect(self.ENCODER_A_R, self.GPIO.RISING, callback=self._enc_r)
+            self._encoders_ok = True
         except Exception:
-            self._switch_to_lgpio()
-        # tenta lgpio
-        base_setup()
+            self._encoders_ok = False
 
     # ---------- encoders ----------
     def _enc_l(self, _): self._ticks_l += 1
@@ -321,7 +264,7 @@ class HardwareControl:
         left = max(-100.0, min(100.0, left))
         right = max(-100.0, min(100.0, right))
 
-        # snap-to-straight (erro pequeno e comandos parecidos) → 70/70
+        # snap-to-straight (erro pequeno e comandos parecidos) → 80/80
         if abs(error) < self.STRAIGHT_ERR_TH and abs(left - right) < self.STRAIGHT_MATCH_DELTA:
             left = self.STRAIGHT_MIN_DUTY
             right = self.STRAIGHT_MIN_DUTY
@@ -400,10 +343,16 @@ class HardwareControl:
 
     def _write_motor_pwm(self, left_cmd, right_cmd):
         """
-        Mesma lógica nas duas rodas (sem inversão).
+        Aplica inversão por roda antes de dirigir BIN1/BIN2.
         CMD >= 0 -> frente (BIN1=1, BIN2=0)
         CMD <  0 -> ré     (BIN1=0, BIN2=1)
         """
+        # inversões (chassi espelhado)
+        if self.INVERT_LEFT:
+            left_cmd = -left_cmd
+        if self.INVERT_RIGHT:
+            right_cmd = -right_cmd
+
         # ESQUERDA
         if left_cmd >= 0:
             self.GPIO.output(self.L_BIN1, 1)
@@ -413,7 +362,7 @@ class HardwareControl:
             self.GPIO.output(self.L_BIN2, 1)
         self._pwm_left.ChangeDutyCycle(abs(left_cmd))
 
-        # DIREITA (idêntico à esquerda)
+        # DIREITA
         if right_cmd >= 0:
             self.GPIO.output(self.R_BIN1, 1)
             self.GPIO.output(self.R_BIN2, 0)
@@ -467,28 +416,10 @@ class HardwareControl:
                 pwm.start(0)
                 self._servo_pwm[i] = pwm
                 self._servo_ready[i] = True
-                # posição inicial suave para não dar tranco
                 try:
                     self.set_servo(i + 1, 'A', smooth_ms=150)
                 except Exception:
                     pass
-            except RuntimeError as e:
-                # Se backend falhar aqui, tenta alternar para lgpio e recriar
-                if _BASE_ERR in str(e):
-                    self._switch_to_lgpio()
-                    self._servo_pwm[i] = None
-                    self._servo_ready[i] = False
-                    try:
-                        self.GPIO.setup(pin, self.GPIO.OUT)
-                        pwm = self.GPIO.PWM(pin, self.SERVO_FREQ_HZ)
-                        pwm.start(0)
-                        self._servo_pwm[i] = pwm
-                        self._servo_ready[i] = True
-                        self.set_servo(i + 1, 'A', smooth_ms=150)
-                    except Exception:
-                        self._servo_ready[i] = False
-                else:
-                    self._servo_ready[i] = False
             except Exception:
                 self._servo_ready[i] = False
         time.sleep(0.05)
