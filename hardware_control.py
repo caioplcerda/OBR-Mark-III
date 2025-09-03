@@ -229,7 +229,7 @@ class HardwareControl:
         self.pid_vel_l = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_L)
         self.pid_vel_r = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_R)
 
-        self._init_servos()
+        self._init_servos()  # <<< Faltava este método
 
         self._last_meas_t = time.time()
         self._last_ticks_l = 0; self._last_ticks_r = 0
@@ -426,12 +426,14 @@ class HardwareControl:
     @staticmethod
     def _us_to_duty(us, period_ms=20.0):
         return max(0.0, min(100.0, (us / 1000.0) / period_ms * 100.0))
+
     def _servo_write_us(self, index, us):
         i = index - 1
         if not (0 <= i < 4) or not self._servo_ready[i]:
             return False
         self._servo_pwm[i].ChangeDutyCycle(self._us_to_duty(int(us)))
         return True
+
     def set_servo(self, index, pos, smooth_ms=0):
         i = index - 1
         if not (0 <= i < 4) or pos not in ("A","B"):
@@ -448,11 +450,48 @@ class HardwareControl:
         else:
             self._servo_write_us(index, target)
         return True
+
     def set_servos(self, positions=('A','A','A','A'), smooth_ms=0):
         for idx, p in enumerate(positions, start=1):
             self.set_servo(idx, p, smooth_ms=smooth_ms)
+
     def set_servo_us(self, index, us):
         return self._servo_write_us(index, int(us))
+
+    def _init_servos(self):
+        """Inicializa PWM dos 4 servos e coloca todos em 'A'. Se falhar, marca como indisponível."""
+        for i, pin in enumerate(self.SERVO_PINS):
+            try:
+                self.GPIO.setup(pin, self.GPIO.OUT)
+                pwm = self.GPIO.PWM(pin, self.SERVO_FREQ_HZ)
+                pwm.start(0)
+                self._servo_pwm[i] = pwm
+                self._servo_ready[i] = True
+                # posição inicial suave para não dar tranco
+                try:
+                    self.set_servo(i + 1, 'A', smooth_ms=150)
+                except Exception:
+                    pass
+            except RuntimeError as e:
+                # Se backend falhar aqui, tenta alternar para lgpio e recriar
+                if _BASE_ERR in str(e):
+                    self._switch_to_lgpio()
+                    self._servo_pwm[i] = None
+                    self._servo_ready[i] = False
+                    try:
+                        self.GPIO.setup(pin, self.GPIO.OUT)
+                        pwm = self.GPIO.PWM(pin, self.SERVO_FREQ_HZ)
+                        pwm.start(0)
+                        self._servo_pwm[i] = pwm
+                        self._servo_ready[i] = True
+                        self.set_servo(i + 1, 'A', smooth_ms=150)
+                    except Exception:
+                        self._servo_ready[i] = False
+                else:
+                    self._servo_ready[i] = False
+            except Exception:
+                self._servo_ready[i] = False
+        time.sleep(0.05)
 
     # ---------- cleanup ----------
     def cleanup(self):
