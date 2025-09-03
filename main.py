@@ -4,6 +4,7 @@
 # - Linha escura/clara via LINE_IS_DARK
 # - "Creep" quando perde a linha (anda devagar reto p/ recapturar)
 # - Interseções, greens, preview e LEDs (7 branco forte; 4+4 mostram status)
+# - Kick inicial e fallback automático para malha aberta se encoders não pulsarem
 
 import os
 import cv2
@@ -49,7 +50,12 @@ CANDIDATE_BUTTON_PINS = [21, 4]
 
 from hardware_control import HardwareControl
 from vision import Vision
-from led_control import LedController
+
+# LEDs são opcionais; se não tiver, tudo funciona igual
+try:
+    from led_control import LedController
+except Exception:
+    LedController = None
 
 # ==== Picamera2 (opcional) ====
 PICAMERA_AVAILABLE = False
@@ -188,11 +194,13 @@ class Robot:
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
-        # LEDs
+        # LEDs (opcional)
+        self.leds = None
         try:
-            self.leds = LedController(pin=12, brightness=150)  # WS2812 (DIN em GPIO12) — opcional
-            if self.leds and self.leds.enabled:
-                self.leds.status_ok_idle()  # 7 branco forte, 4+4 branco fraco
+            if LedController is not None:
+                self.leds = LedController(pin=12, brightness=150)  # WS2812 (DIN em GPIO12)
+                if self.leds and getattr(self.leds, "enabled", False):
+                    self.leds.status_ok_idle()  # 7 branco forte, 4+4 branco fraco
         except Exception as e:
             self.leds = None
             log(f"LEDs desabilitados: {e}")
@@ -221,6 +229,38 @@ class Robot:
         if self.running:
             log("Robô já está rodando.")
             return
+
+        # --- KICK INICIAL + fallback para malha aberta se encoder não pulsar ---
+        enc0_l = enc0_r = None
+        try:
+            if hasattr(self.hardware, "read_encoders"):
+                enc0_l, enc0_r = self.hardware.read_encoders()
+        except Exception:
+            enc0_l = enc0_r = None
+
+        # “kick” 300 ms para tirar da inércia
+        try:
+            self.hardware.set_motor_speed(60, 0.0)  # reto
+            time.sleep(0.30)
+            self.hardware.stop()
+        except Exception:
+            pass
+
+        # verifica pulsos
+        try:
+            if enc0_l is not None and enc0_r is not None and hasattr(self.hardware, "read_encoders"):
+                enc1_l, enc1_r = self.hardware.read_encoders()
+                dl = (enc1_l - enc0_l)
+                dr = (enc1_r - enc0_r)
+                log(f"[kick] Δticks L={dl} R={dr}")
+                if dl <= 0 and dr <= 0 and hasattr(self.hardware, "_encoders_ok"):
+                    # encoders não pulsaram → força malha aberta
+                    self.hardware._encoders_ok = False
+                    log("Encoders não pulsaram no kick — forçando malha aberta (PWM direto).")
+        except Exception:
+            pass
+        # -----------------------------------------------------------------------
+
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -383,7 +423,7 @@ class Robot:
             colsum /= (255.0 * h)
         return colsum
 
-    # >>>>>>> CORRIGIDO: este método estava indentado errado no seu arquivo <<<<<<<
+    # <<< estava indentado errado no seu arquivo; agora está correto >>>
     def _is_bimodal(self, profile, min_sep_px=80, min_peak=0.20):
         p = profile
         if p is None or len(p) < 7:
