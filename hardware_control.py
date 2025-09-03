@@ -341,11 +341,6 @@ class HardwareControl:
             if elapsed<period: time.sleep(period-elapsed)
 
     def _write_motor_pwm(self, left_cmd, right_cmd):
-    """
-    Mesma lógica nas duas rodas (sem inversão).
-    CMD >= 0 -> frente (BIN1=1, BIN2=0)
-    CMD <  0 -> ré     (BIN1=0, BIN2=1)
-    """
 
     # ESQUERDA
     if left_cmd >= 0:
