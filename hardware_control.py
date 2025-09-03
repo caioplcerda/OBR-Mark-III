@@ -147,13 +147,13 @@ class HardwareControl:
     """
 
     # ---- Ajustes principais ----
-    MIN_DUTY = 50.0          # deadband para vencer inércia
+    MIN_DUTY = 60.0          # deadband para vencer inércia
     OPEN_LOOP = True         # <<<<< por padrão, malha aberta
     AUTO_FALLBACK_OPEN = True
     FALLBACK_CHECK_SEC = 0.7 # se alvo alto e tps ~0 por esse tempo -> força open-loop
 
     # Encoders alvo/mensuração
-    TICKS_PER_REV = 20
+    TICKS_PER_REV = 36
     MAX_TICKS_PER_SEC = 300.0
     CONTROL_HZ = 50
     VEL_PID_L = dict(kp=0.25, ki=0.35, kd=0.0, sample_time=1.0/CONTROL_HZ)
