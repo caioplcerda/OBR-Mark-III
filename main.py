@@ -145,7 +145,7 @@ class Robot:
     CREEP_WHEN_LOST = True
     CREEP_SPEED = 35
 
-    BASE_SPEED = 55
+    BASE_SPEED = 80
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
