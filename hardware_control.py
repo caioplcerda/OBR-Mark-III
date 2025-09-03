@@ -357,7 +357,7 @@ class HardwareControl:
         self._ticks_l = 0
         self._ticks_r = 0
         self._last_ticks_l = 0
-               self._last_ticks_r = 0
+        self._last_ticks_r = 0
         self.meas_tps_l = 0.0
         self.meas_tps_r = 0.0
 
