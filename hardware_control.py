@@ -171,7 +171,7 @@ class HardwareControl:
 
     # Polaridade por roda (ajuste se necessário)
     INVERT_LEFT  = False
-    INVERT_RIGHT = True   # <<<<< conforme seu hardware observado
+    INVERT_RIGHT = False   # <<<<< conforme seu hardware observado
 
     # Encoders (canal A)
     ENCODER_A_L, ENCODER_B_L = 6, 13
@@ -341,20 +341,30 @@ class HardwareControl:
             if elapsed<period: time.sleep(period-elapsed)
 
     def _write_motor_pwm(self, left_cmd, right_cmd):
-        # aplica polaridade
-        def _drive_pair(bin1, bin2, cmd, invert=False):
-            if invert: cmd = -cmd
-            if cmd>=0:
-                self.GPIO.output(bin1, 1); self.GPIO.output(bin2, 0)
-            else:
-                self.GPIO.output(bin1, 0); self.GPIO.output(bin2, 1)
-            return abs(cmd)
+    """
+    Mesma lógica nas duas rodas (sem inversão).
+    CMD >= 0 -> frente (BIN1=1, BIN2=0)
+    CMD <  0 -> ré     (BIN1=0, BIN2=1)
+    """
 
-        duty_l = _drive_pair(self.L_BIN1, self.L_BIN2, left_cmd, invert=self.INVERT_LEFT)
-        duty_r = _drive_pair(self.R_BIN1, self.R_BIN2, right_cmd, invert=self.INVERT_RIGHT)
+    # ESQUERDA
+    if left_cmd >= 0:
+        self.GPIO.output(self.L_BIN1, 1)
+        self.GPIO.output(self.L_BIN2, 0)
+    else:
+        self.GPIO.output(self.L_BIN1, 0)
+        self.GPIO.output(self.L_BIN2, 1)
+    self._pwm_left.ChangeDutyCycle(abs(left_cmd))
 
-        self._pwm_left.ChangeDutyCycle(duty_l)
-        self._pwm_right.ChangeDutyCycle(duty_r)
+    # DIREITA (idêntico à esquerda)
+    if right_cmd >= 0:
+        self.GPIO.output(self.R_BIN1, 1)
+        self.GPIO.output(self.R_BIN2, 0)
+    else:
+        self.GPIO.output(self.R_BIN1, 0)
+        self.GPIO.output(self.R_BIN2, 1)
+    self._pwm_right.ChangeDutyCycle(abs(right_cmd))
+
 
     # ---------- servos ----------
     @staticmethod
