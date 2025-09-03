@@ -1,7 +1,7 @@
 # main.py
-# Segue-linha robusto + UI web + botão físico.
-# LEDs WS2812 DESLIGADOS por padrão para evitar interferência no PWM dos motores.
-# Se quiser reativar depois que confirmar que anda, mude USE_LEDS=True.
+# Segue-linha robusto + UI web + botão físico (21/4).
+# Câmera rotacionada 180°. LEDs WS2812 desligados por padrão (USE_LEDS=False).
+# Usa HardwareControl (lgpio) e Vision (greens).
 
 import os
 import cv2
@@ -12,10 +12,10 @@ import numpy as np
 from datetime import datetime
 from collections import deque
 
-# ======== NOVO: toggle para LEDs ========
-USE_LEDS = False  # <<< desliga WS2812 (evita travar PWM de motor)
+# ===== LEDs OFF por segurança (evitar travar PWM) =====
+USE_LEDS = False
 
-# ==== Estado WEB (compartilhado) ====
+# ==== Estado WEB ====
 WEB_AVAILABLE = False
 SHARED_STATE = {
     "config": {},
@@ -26,7 +26,6 @@ SHARED_STATE = {
     "fps": 0.0,
     "log": [],
 }
-
 try:
     import web_stream
     if hasattr(web_stream, "SHARED_STATE"):
@@ -35,7 +34,7 @@ try:
 except Exception:
     WEB_AVAILABLE = False
 
-# ==== GPIO (opcional) ====
+# ==== GPIO opcional (só pro botão) ====
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
@@ -54,7 +53,7 @@ try:
 except Exception:
     LedController = None
 
-# ==== Picamera2 (opcional) ====
+# ==== Picamera2 opcional ====
 PICAMERA_AVAILABLE = False
 try:
     from picamera2 import Picamera2
@@ -77,16 +76,20 @@ def log(msg: str):
     except Exception:
         pass
 
+# ------------------ Câmera (com rotate 180°) ------------------
 class Camera:
+    """Picamera2 ou USB; retorna BGR; aplica rotate_180 se necessário."""
     def __init__(self, width=640, height=480, rotate_180=True):
         self.width = width
         self.height = height
         self.rotate_180 = rotate_180
         self.picam = None
         self.cap = None
+
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
+                # sem flips; giramos manualmente depois
                 if 'Transform' in globals() and Transform is not None:
                     cfg = self.picam.create_preview_configuration(
                         main={"size": (self.width, self.height), "format": "RGB888"},
@@ -102,12 +105,14 @@ class Camera:
             except Exception as e:
                 log(f"Falha Picamera2: {e}. Usando OpenCV/USB.")
                 self.picam = None
+
         if self.picam is None:
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             if not self.cap.isOpened():
                 raise RuntimeError("Nenhuma câmera disponível.")
+
     def read(self):
         if self.picam is not None:
             rgb = self.picam.capture_array()
@@ -116,9 +121,12 @@ class Camera:
             ok, frame_bgr = self.cap.read()
             if not ok:
                 raise RuntimeError("Falha ao ler frame da câmera USB.")
+
+        # ROTACIONA 180°
         if self.rotate_180:
             frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
         return frame_bgr
+
     def release(self):
         try:
             if self.picam is not None:
@@ -128,6 +136,7 @@ class Camera:
         except Exception:
             pass
 
+# ------------------ Robô ------------------
 class Robot:
     WIDTH = 640
     HEIGHT = 480
@@ -166,11 +175,10 @@ class Robot:
         self.running = False
         self.thread = None
 
-        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)
+        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=True)  # <<< 180°
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
 
-        # ======= LEDs: DESLIGADOS por padrão =======
         self.leds = None
         if USE_LEDS and LedController is not None:
             try:
@@ -200,7 +208,7 @@ class Robot:
         self.LEFT_CROP = int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
         self.RIGHT_CROP = self.WIDTH - int(self.WIDTH * self.SIDE_MARGIN_FRACTION)
 
-    # ===== ciclo de vida =====
+    # ---- ciclo de vida ----
     def start(self):
         if self.running:
             log("Robô já está rodando.")
@@ -217,31 +225,26 @@ class Robot:
     def stop(self):
         self.running = False
         SHARED_STATE["status"] = "stopped"
-        try:
-            self.hardware.stop()
-        except Exception:
-            pass
+        try: self.hardware.stop()
+        except Exception: pass
         if getattr(self, "leds", None):
             try:
                 self.leds.status_lost()
                 self.leds.status_ok_idle()
-            except Exception:
-                pass
+            except Exception: pass
         log("Parado.")
 
     def cleanup(self):
         self.running = False
-        try:
-            self.hardware.cleanup()
-        except Exception:
-            pass
+        try: self.hardware.cleanup()
+        except Exception: pass
         self.camera.release()
         if getattr(self, "leds", None):
             try: self.leds.cleanup()
             except Exception: pass
         log("Recursos liberados.")
 
-    # ===== UI =====
+    # ---- UI ----
     def set_view_mode(self, mode: str):
         SHARED_STATE["view_mode"] = mode
         log(f"View mode -> {mode}")
@@ -296,7 +299,7 @@ class Robot:
             except Exception as e:
                 log(f"Falha ao ler config.json: {e}")
 
-    # ===== motores =====
+    # ---- motores ----
     def _drive(self, base_speed: float, error: float):
         try:
             self.hardware.set_motor_speed(base_speed, error)
@@ -305,7 +308,7 @@ class Robot:
             right = int(max(-100, min(100, base_speed + error)))
             self.hardware.set_motor_speed(left, right)
 
-    # ===== visão =====
+    # ---- visão (binarização, centróides, etc) ----
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if self.BIN_BLUR > 1:
@@ -427,7 +430,7 @@ class Robot:
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
         return out
 
-    # ===== loop principal =====
+    # ------------------ LOOP PRINCIPAL ------------------
     def _loop(self):
         try:
             while self.running:
@@ -586,6 +589,33 @@ class Robot:
             try: self.hardware.stop()
             except Exception: pass
 
+    # ---- helpers de preview/publicação ----
+    def _draw_preview(self, frame, bw, cents, fit_angle, look_point, is_intersection, is_curve90, is_ahead, green_dir):
+        out = frame.copy()
+        y_base = int(self.STRIP_BOTTOM)
+        cv2.line(out, (0, y_base), (self.WIDTH-1, y_base), (0, 0, 255), 2)
+        cv2.rectangle(out, (0, 0), (self.LEFT_CROP, self.HEIGHT-1), (40, 40, 40), 1)
+        cv2.rectangle(out, (self.RIGHT_CROP, 0), (self.WIDTH-1, self.HEIGHT-1), (40, 40, 40), 1)
+        for i, c in enumerate(cents):
+            y0 = int(self.STRIP_BOTTOM - i*self.STRIP_H)
+            cv2.rectangle(out, (self.LEFT_CROP, y0), (self.RIGHT_CROP-1, y0 + self.STRIP_H), (80, 80, 80), 1)
+            if c is not None:
+                cv2.circle(out, (int(c[0]), int(c[1])), 6, (0, 200, 0), -1, cv2.LINE_AA)
+        valids = [c for c in cents if c is not None]
+        if len(valids) >= 2:
+            pA, pB = valids[0], valids[-1]
+            cv2.line(out, (int(pA[0]), int(pA[1])), (int(pB[0]), int(pB[1])), (255, 0, 0), 2, cv2.LINE_AA)
+        if look_point is not None:
+            cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
+        txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
+        if is_intersection: txt += "  INT"
+        if is_curve90: txt += "  C90"
+        if is_ahead: txt += "  AHEAD"
+        if green_dir: txt += f"  GREEN:{green_dir}"
+        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
+        cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+        return out
+
     def _publish(self, frame, status_msg):
         left = getattr(self.hardware, "last_left_speed", 0)
         right = getattr(self.hardware, "last_right_speed", 0)
@@ -601,7 +631,7 @@ class Robot:
             SHARED_STATE["fps"] = round(fps, 1)
             log(f"Status: {status_msg} | FPS ~ {fps:.1f} | L/R: {left}/{right}")
 
-# ==== WEB / comandos ====
+# ------------------ Web/Socket ------------------
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
         return
@@ -635,6 +665,7 @@ def _wire_web(robot: Robot):
     except Exception as e:
         log(f"Falha ao integrar com web_stream: {e}")
 
+# ------------------ Botão físico ------------------
 def _setup_button(robot: Robot):
     if not GPIO_AVAILABLE:
         log("GPIO indisponível: iniciando sem botão físico.")
@@ -683,6 +714,7 @@ def _setup_button(robot: Robot):
     th = threading.Thread(target=_safety_poll, daemon=True)
     th.start()
 
+# ------------------ main ------------------
 def main():
     robot = Robot()
     _wire_web(robot)
