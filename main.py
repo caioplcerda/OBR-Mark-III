@@ -78,51 +78,68 @@ def log(msg: str):
 
 # ------------------ Câmera (com rotate 180°) ------------------
 class Camera:
-    """Picamera2 ou USB; retorna BGR; aplica rotate_180 se necessário."""
-    def __init__(self, width=640, height=480, rotate_180=True):
+    """Picamera2 em modo vídeo; retorno BGR. Sem rotação (imagem em pé)."""
+    def __init__(self, width=640, height=480, rotate_180=False):
         self.width = width
         self.height = height
         self.rotate_180 = rotate_180
         self.picam = None
         self.cap = None
 
+        # Dica: OpenCV usa todos os núcleos por padrão; no Pi isso compete com o encoder
+        try:
+            import cv2 as _cv2
+            _cv2.setNumThreads(1)
+        except Exception:
+            pass
+
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
-                # sem flips; giramos manualmente depois
-                if 'Transform' in globals() and Transform is not None:
-                    cfg = self.picam.create_preview_configuration(
+                # Modo de VÍDEO (menor latência que preview), menos buffers
+                if Transform is not None:
+                    cfg = self.picam.create_video_configuration(
                         main={"size": (self.width, self.height), "format": "RGB888"},
                         transform=Transform(hflip=0, vflip=0),
+                        buffer_count=3
                     )
                 else:
-                    cfg = self.picam.create_preview_configuration(
-                        main={"size": (self.width, self.height), "format": "RGB888"}
+                    cfg = self.picam.create_video_configuration(
+                        main={"size": (self.width, self.height), "format": "RGB888"},
+                        buffer_count=3
                     )
                 self.picam.configure(cfg)
+
+                # Força ~30 fps se o sensor permitir (limites em microssegundos)
+                # 1/30s ~= 33333us. (10_000, 33_333) = 30–100 fps aprox
+                try:
+                    self.picam.set_controls({"FrameDurationLimits": (10000, 33333)})
+                except Exception:
+                    pass
+
                 self.picam.start()
-                log("Picamera2 iniciada.")
+                log("Picamera2 iniciada em modo vídeo.")
             except Exception as e:
                 log(f"Falha Picamera2: {e}. Usando OpenCV/USB.")
                 self.picam = None
 
         if self.picam is None:
+            # Fallback USB (mantém como estava)
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
             if not self.cap.isOpened():
                 raise RuntimeError("Nenhuma câmera disponível.")
 
     def read(self):
         if self.picam is not None:
-            rgb = self.picam.capture_array()
+            rgb = self.picam.capture_array()  # zero-copy do pipeline
             frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         else:
             ok, frame_bgr = self.cap.read()
             if not ok:
                 raise RuntimeError("Falha ao ler frame da câmera USB.")
-
-        # ROTACIONA 180°
         if self.rotate_180:
             frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
         return frame_bgr
