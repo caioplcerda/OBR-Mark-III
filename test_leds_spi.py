@@ -16,7 +16,7 @@ import spidev
 
 # ========= CONFIGURAÇÃO GERAL =========
 LED_COUNT        = 21                 # 3 x 7
-SEGMENT_SIZE     = 7
+SEGMENT_SIZE     = 8
 SEGMENT_ORDER    = ["esquerda", "direita", "meio"]  # rótulos
 REVERSE_SEGMENT  = [False, False, False]
 
