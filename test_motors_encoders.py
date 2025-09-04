@@ -33,14 +33,14 @@ PAUSE = 0.6        # pausa entre etapas
 ticks_l = 0
 ticks_r = 0
 
-def enc_l(_chip, _gpio, _level, _tick):
+def enc_l(_chip, _gpio, level, _tick):
     global ticks_l
-    if _level == 1:
+    if level == 1:
         ticks_l += 1
 
-def enc_r(_chip, _gpio, _level, _tick):
+def enc_r(_chip, _gpio, level, _tick):
     global ticks_r
-    if _level == 1:
+    if level == 1:
         ticks_r += 1
 
 def motor_left_forward(h):
@@ -114,8 +114,8 @@ def main():
     lgpio.gpio_claim_input(h, ENCODER_A_R, lgpio.SET_PULL_UP)
     lgpio.gpio_claim_alert(h, ENCODER_A_L, lgpio.RISING_EDGE, 0)
     lgpio.gpio_claim_alert(h, ENCODER_A_R, lgpio.RISING_EDGE, 0)
-    lgpio.set_alert_func(h, ENCODER_A_L, enc_l)
-    lgpio.set_alert_func(h, ENCODER_A_R, enc_r)
+    lgpio.gpio_set_alert_func(h, ENCODER_A_L, enc_l)
+    lgpio.gpio_set_alert_func(h, ENCODER_A_R, enc_r)
 
     # Liga driver
     lgpio.gpio_write(h, STBY, 1)
@@ -168,8 +168,8 @@ def main():
             pass
 
         try:
-            lgpio.set_alert_func(h, ENCODER_A_L, None)
-            lgpio.set_alert_func(h, ENCODER_A_R, None)
+            lgpio.gpio_set_alert_func(h, ENCODER_A_L, None)
+            lgpio.gpio_set_alert_func(h, ENCODER_A_R, None)
         except Exception:
             pass
 
