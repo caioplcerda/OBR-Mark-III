@@ -1,5 +1,6 @@
 # test_motors_encoders.py
 # Teste isolado de motores + encoders (TB6612FNG, canal B) no Raspberry Pi.
+# Usa lgpio (alinhado com hardware_control.py).
 # - Esquerda:  BIN1=17, BIN2=27, PWMB=22
 # - Direita:   BIN1=23, BIN2=24, PWMB=25 (inversão lógica para frente)
 # - STBY:      5
@@ -11,7 +12,7 @@
 # 3. Esquerdo frente, direito trás (5s)
 # 4. Esquerdo trás, direito frente (5s)
 
-import RPi.GPIO as GPIO
+import lgpio
 import time
 
 # ===== PINAGEM MOTOR =====
@@ -32,54 +33,56 @@ PAUSE = 0.6        # pausa entre etapas
 ticks_l = 0
 ticks_r = 0
 
-def enc_l(_):
+def enc_l(_chip, _gpio, _level, _tick):
     global ticks_l
-    ticks_l += 1
+    if _level == 1:
+        ticks_l += 1
 
-def enc_r(_):
+def enc_r(_chip, _gpio, _level, _tick):
     global ticks_r
-    ticks_r += 1
+    if _level == 1:
+        ticks_r += 1
 
-def motor_left_forward():
-    GPIO.output(L_BIN1, GPIO.HIGH)
-    GPIO.output(L_BIN2, GPIO.LOW)
+def motor_left_forward(h):
+    lgpio.gpio_write(h, L_BIN1, 1)
+    lgpio.gpio_write(h, L_BIN2, 0)
 
-def motor_left_reverse():
-    GPIO.output(L_BIN1, GPIO.LOW)
-    GPIO.output(L_BIN2, GPIO.HIGH)
+def motor_left_reverse(h):
+    lgpio.gpio_write(h, L_BIN1, 0)
+    lgpio.gpio_write(h, L_BIN2, 1)
 
-def motor_right_forward():
+def motor_right_forward(h):
     # Inversão lógica para "frente" no direito (chassi espelhado)
-    GPIO.output(R_BIN1, GPIO.HIGH)
-    GPIO.output(R_BIN2, GPIO.LOW)
+    lgpio.gpio_write(h, R_BIN1, 1)
+    lgpio.gpio_write(h, R_BIN2, 0)
 
-def motor_right_reverse():
-    GPIO.output(R_BIN1, GPIO.LOW)
-    GPIO.output(R_BIN2, GPIO.HIGH)
+def motor_right_reverse(h):
+    lgpio.gpio_write(h, R_BIN1, 0)
+    lgpio.gpio_write(h, R_BIN2, 1)
 
-def stop_motors():
-    GPIO.output(L_BIN1, GPIO.LOW)
-    GPIO.output(L_BIN2, GPIO.LOW)
-    GPIO.output(R_BIN1, GPIO.LOW)
-    GPIO.output(R_BIN2, GPIO.LOW)
+def stop_motors(h):
+    lgpio.gpio_write(h, L_BIN1, 0)
+    lgpio.gpio_write(h, L_BIN2, 0)
+    lgpio.gpio_write(h, R_BIN1, 0)
+    lgpio.gpio_write(h, R_BIN2, 0)
 
-def run_window(pwm_l, pwm_r, set_dir_fn, desc, left_duty, right_duty):
+def run_window(h, pwm_l, pwm_r, set_dir_fn, desc, left_duty, right_duty):
     """Roda uma janela de teste (5s) com direções específicas."""
     global ticks_l, ticks_r
     ticks_l = 0
     ticks_r = 0
 
-    stop_motors()
-    set_dir_fn()
-    pwm_l.ChangeDutyCycle(left_duty)
-    pwm_r.ChangeDutyCycle(right_duty)
+    stop_motors(h)
+    set_dir_fn(h)
+    lgpio.tx_pwm(h, L_PWMB, 1000, left_duty)
+    lgpio.tx_pwm(h, R_PWMB, 1000, right_duty)
     t0 = time.time()
     while time.time() - t0 < WINDOW:
         time.sleep(0.05)
 
-    stop_motors()
-    pwm_l.ChangeDutyCycle(0)
-    pwm_r.ChangeDutyCycle(0)
+    stop_motors(h)
+    lgpio.tx_pwm(h, L_PWMB, 1000, 0)
+    lgpio.tx_pwm(h, R_PWMB, 1000, 0)
 
     print(f"[TESTE] {desc}")
     print(f"Ticks (L,R): {ticks_l}, {ticks_r}")
@@ -94,58 +97,59 @@ def run_window(pwm_l, pwm_r, set_dir_fn, desc, left_duty, right_duty):
     print()
 
 def main():
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
+    # Inicializa lgpio
+    h = lgpio.gpiochip_open(0)
+    if h < 0:
+        print("Erro: Não conseguiu abrir o chip GPIO. Verifique permissões (sudo) ou instale liblgpio.")
+        return
 
-    # Motores
+    # Configura pinos motores
     for pin in [L_BIN1, L_BIN2, R_BIN1, R_BIN2, STBY]:
-        GPIO.setup(pin, GPIO.OUT)
-    GPIO.setup(L_PWMB, GPIO.OUT)
-    GPIO.setup(R_PWMB, GPIO.OUT)
-    pwm_left = GPIO.PWM(L_PWMB, 1000)
-    pwm_right = GPIO.PWM(R_PWMB, 1000)
-    pwm_left.start(0)
-    pwm_right.start(0)
+        lgpio.gpio_claim_output(h, pin, 0)
+    lgpio.gpio_claim_output(h, L_PWMB, 0)
+    lgpio.gpio_claim_output(h, R_PWMB, 0)
 
-    # Encoders
-    GPIO.setup(ENCODER_A_L, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(ENCODER_A_R, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(ENCODER_A_L, GPIO.RISING, callback=enc_l)
-    GPIO.add_event_detect(ENCODER_A_R, GPIO.RISING, callback=enc_r)
+    # Configura encoders
+    lgpio.gpio_claim_input(h, ENCODER_A_L, lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_input(h, ENCODER_A_R, lgpio.SET_PULL_UP)
+    lgpio.gpio_claim_alert(h, ENCODER_A_L, lgpio.RISING_EDGE, 0)
+    lgpio.gpio_claim_alert(h, ENCODER_A_R, lgpio.RISING_EDGE, 0)
+    lgpio.set_alert_func(h, ENCODER_A_L, enc_l)
+    lgpio.set_alert_func(h, ENCODER_A_R, enc_r)
 
     # Liga driver
-    GPIO.output(STBY, GPIO.HIGH)
+    lgpio.gpio_write(h, STBY, 1)
 
     try:
         print("== TESTE MOTORES + ENCODERS ==")
         print(f"Duty = {DUTY}% | Janela = {WINDOW:.1f}s\n")
 
         # 1. Ambos frente
-        def both_forward():
-            motor_left_forward()
-            motor_right_forward()
-        run_window(pwm_left, pwm_right, both_forward, "Ambos frente", DUTY, DUTY)
+        def both_forward(h):
+            motor_left_forward(h)
+            motor_right_forward(h)
+        run_window(h, None, None, both_forward, "Ambos frente", DUTY, DUTY)
         time.sleep(PAUSE)
 
         # 2. Ambos trás
-        def both_reverse():
-            motor_left_reverse()
-            motor_right_reverse()
-        run_window(pwm_left, pwm_right, both_reverse, "Ambos trás", DUTY, DUTY)
+        def both_reverse(h):
+            motor_left_reverse(h)
+            motor_right_reverse(h)
+        run_window(h, None, None, both_reverse, "Ambos trás", DUTY, DUTY)
         time.sleep(PAUSE)
 
         # 3. Esquerdo frente, direito trás
-        def left_forward_right_reverse():
-            motor_left_forward()
-            motor_right_reverse()
-        run_window(pwm_left, pwm_right, left_forward_right_reverse, "Esq frente, Dir trás", DUTY, DUTY)
+        def left_forward_right_reverse(h):
+            motor_left_forward(h)
+            motor_right_reverse(h)
+        run_window(h, None, None, left_forward_right_reverse, "Esq frente, Dir trás", DUTY, DUTY)
         time.sleep(PAUSE)
 
         # 4. Esquerdo trás, direito frente
-        def left_reverse_right_forward():
-            motor_left_reverse()
-            motor_right_forward()
-        run_window(pwm_left, pwm_right, left_reverse_right_forward, "Esq trás, Dir frente", DUTY, DUTY)
+        def left_reverse_right_forward(h):
+            motor_left_reverse(h)
+            motor_right_forward(h)
+        run_window(h, None, None, left_reverse_right_forward, "Esq trás, Dir frente", DUTY, DUTY)
         time.sleep(PAUSE)
 
         print("OBS: Encoders de 1 canal contam pulsos (sem sentido).")
@@ -156,27 +160,21 @@ def main():
         pass
     finally:
         try:
-            stop_motors()
-            pwm_left.ChangeDutyCycle(0)
-            pwm_right.ChangeDutyCycle(0)
-            GPIO.output(STBY, GPIO.LOW)
+            stop_motors(h)
+            lgpio.tx_pwm(h, L_PWMB, 1000, 0)
+            lgpio.tx_pwm(h, R_PWMB, 1000, 0)
+            lgpio.gpio_write(h, STBY, 0)
         except Exception:
             pass
 
         try:
-            GPIO.remove_event_detect(ENCODER_A_L)
-            GPIO.remove_event_detect(ENCODER_A_R)
+            lgpio.set_alert_func(h, ENCODER_A_L, None)
+            lgpio.set_alert_func(h, ENCODER_A_R, None)
         except Exception:
             pass
 
         try:
-            pwm_left.stop()
-            pwm_right.stop()
-        except Exception:
-            pass
-
-        try:
-            GPIO.cleanup()
+            lgpio.gpiochip_close(h)
         except Exception:
             pass
 
