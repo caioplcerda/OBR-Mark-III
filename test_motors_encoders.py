@@ -1,11 +1,15 @@
-# test_motors_encoders_v2.py
+# test_motors_encoders.py
 # Teste isolado de motores + encoders (TB6612FNG, canal B) no Raspberry Pi.
 # - Esquerda:  BIN1=17, BIN2=27, PWMB=22
-# - Direita:   BIN1=23, BIN2=24, PWMB=25 (fiação comum costuma exigir inversão lógica)
+# - Direita:   BIN1=23, BIN2=24, PWMB=25 (inversão lógica para frente)
 # - STBY:      5
-# Encoders (canal A): Esq=BCM 6, Dir=BCM 19. (B estão listados se quiser direção no futuro)
+# Encoders (canal A): Esq=BCM 6, Dir=BCM 19
 #
-# Roda cada motor sozinho (frente e ré), por 2s, e mostra os ticks.
+# Testes:
+# 1. Ambos motores frente (5s)
+# 2. Ambos motores trás (5s)
+# 3. Esquerdo frente, direito trás (5s)
+# 4. Esquerdo trás, direito frente (5s)
 
 import RPi.GPIO as GPIO
 import time
@@ -21,7 +25,7 @@ ENCODER_A_R, ENCODER_B_R = 19, 26
 
 # ===== CONFIG TESTE =====
 DUTY = 100          # % PWM
-WINDOW = 5.0      # segundos cada etapa
+WINDOW = 5.0       # segundos cada etapa
 PAUSE = 0.6        # pausa entre etapas
 
 # ===== CONTADORES =====
@@ -45,7 +49,7 @@ def motor_left_reverse():
     GPIO.output(L_BIN2, GPIO.HIGH)
 
 def motor_right_forward():
-    # Muitos chassis precisam desta lógica p/ "frente" no direito:
+    # Inversão lógica para "frente" no direito (chassi espelhado)
     GPIO.output(R_BIN1, GPIO.HIGH)
     GPIO.output(R_BIN2, GPIO.LOW)
 
@@ -59,28 +63,35 @@ def stop_motors():
     GPIO.output(R_BIN1, GPIO.LOW)
     GPIO.output(R_BIN2, GPIO.LOW)
 
-def run_window(pwm_l, pwm_r, set_dir_fn, which):
-    """Roda uma janela de teste (2s) para um motor específico."""
+def run_window(pwm_l, pwm_r, set_dir_fn, desc, left_duty, right_duty):
+    """Roda uma janela de teste (5s) com direções específicas."""
     global ticks_l, ticks_r
     ticks_l = 0
     ticks_r = 0
 
     stop_motors()
     set_dir_fn()
-    pwm_l.ChangeDutyCycle(DUTY)
-    pwm_r.ChangeDutyCycle(DUTY)
+    pwm_l.ChangeDutyCycle(left_duty)
+    pwm_r.ChangeDutyCycle(right_duty)
     t0 = time.time()
     while time.time() - t0 < WINDOW:
         time.sleep(0.05)
 
-    # Para o PWM do motor não testado (mantém só o testado ativo na janela)
-    if which == "L":
-        pwm_r.ChangeDutyCycle(0)
-    else:
-        pwm_l.ChangeDutyCycle(0)
     stop_motors()
+    pwm_l.ChangeDutyCycle(0)
+    pwm_r.ChangeDutyCycle(0)
 
-    return ticks_l, ticks_r
+    print(f"[TESTE] {desc}")
+    print(f"Ticks (L,R): {ticks_l}, {ticks_r}")
+    if ticks_l == 0 and left_duty != 0:
+        print("  ! Encoder ESQUERDO não contou. Verifique BCM 6, GND, VCC ou fiação BIN1/BIN2.")
+    if ticks_r == 0 and right_duty != 0:
+        print("  ! Encoder DIREITO não contou. Verifique BCM 19, GND, VCC ou fiação BIN1/BIN2.")
+    if ticks_l > 0 and left_duty != 0:
+        print("  ✓ Encoder ESQUERDO OK.")
+    if ticks_r > 0 and right_duty != 0:
+        print("  ✓ Encoder DIREITO OK.")
+    print()
 
 def main():
     GPIO.setwarnings(False)
@@ -109,60 +120,41 @@ def main():
         print("== TESTE MOTORES + ENCODERS ==")
         print(f"Duty = {DUTY}% | Janela = {WINDOW:.1f}s\n")
 
-        # ----- ESQUERDA FRENTE -----
-        print("[L] Frente...")
-        tl, tr = run_window(pwm_left, pwm_right, motor_left_forward, "L")
-        print(f"Ticks (L,R): {tl}, {tr}")
-        if tl == 0:
-            print("  ! Encoder ESQUERDO não contou na frente. Verifique fio do ENCODER_A_L (BCM 6), GND e VCC.\n")
-        else:
-            print("  ✓ Encoder ESQUERDO OK na frente.\n")
+        # 1. Ambos frente
+        def both_forward():
+            motor_left_forward()
+            motor_right_forward()
+        run_window(pwm_left, pwm_right, both_forward, "Ambos frente", DUTY, DUTY)
         time.sleep(PAUSE)
 
-        # ----- ESQUERDA RÉ -----
-        print("[L] Ré...")
-        tl, tr = run_window(pwm_left, pwm_right, motor_left_reverse, "L")
-        print(f"Ticks (L,R): {tl}, {tr}")
-        if tl == 0:
-            print("  ! Encoder ESQUERDO não contou na ré. Se contou na frente, talvez a roda não girou na ré (TB6612, fiação BIN1/BIN2) ou atrito mecânico.\n")
-        else:
-            print("  ✓ Encoder ESQUERDO OK na ré.\n")
+        # 2. Ambos trás
+        def both_reverse():
+            motor_left_reverse()
+            motor_right_reverse()
+        run_window(pwm_left, pwm_right, both_reverse, "Ambos trás", DUTY, DUTY)
         time.sleep(PAUSE)
 
-        # ----- DIREITA FRENTE -----
-        print("[R] Frente...")
-        tl, tr = run_window(pwm_left, pwm_right, motor_right_forward, "R")
-        print(f"Ticks (L,R): {tl}, {tr}")
-        if tr == 0:
-            print("  ! Encoder DIREITO não contou na frente. Verifique ENCODER_A_R (BCM 19), GND, VCC.\n")
-        else:
-            print("  ✓ Encoder DIREITO OK na frente.\n")
+        # 3. Esquerdo frente, direito trás
+        def left_forward_right_reverse():
+            motor_left_forward()
+            motor_right_reverse()
+        run_window(pwm_left, pwm_right, left_forward_right_reverse, "Esq frente, Dir trás", DUTY, DUTY)
         time.sleep(PAUSE)
 
-        # ----- DIREITA RÉ -----
-        print("[R] Ré...")
-        tl, tr = run_window(pwm_left, pwm_right, motor_right_reverse, "R")
-        print(f"Ticks (L,R): {tl}, {tr}")
-        if tr == 0:
-            print("  ! Encoder DIREITO não contou na ré. Se contou na frente, talvez a roda não girou na ré (TB6612, fiação BIN1/BIN2) ou atrito mecânico.\n")
-        else:
-            print("  ✓ Encoder DIREITO OK na ré.\n")
+        # 4. Esquerdo trás, direito frente
+        def left_reverse_right_forward():
+            motor_left_reverse()
+            motor_right_forward()
+        run_window(pwm_left, pwm_right, left_reverse_right_forward, "Esq trás, Dir frente", DUTY, DUTY)
         time.sleep(PAUSE)
 
-        print("OBS: Com encoder de 1 canal estamos só contando pulsos (sem sentido).")
-        print("     Para checar inversão 'frente/ré', observe fisicamente o giro da roda.")
-        print("     Se o direito gira ao contrário na frente, inverta a lógica do R_BIN1/R_BIN2 no seu código.")
-
-        # Loop live (Ctrl+C para sair)
-        print("\n[LIVE] Girando manualmente as rodas deve aumentar os ticks.")
-        while True:
-            print(f"[LIVE] Ticks L={ticks_l} | R={ticks_r}")
-            time.sleep(1.0)
+        print("OBS: Encoders de 1 canal contam pulsos (sem sentido).")
+        print("     Cheque fisicamente se 'frente' move o robô para frente.")
+        print("     Se o direito gira ao contrário, confirme inversão em R_BIN1/R_BIN2.")
 
     except KeyboardInterrupt:
         pass
     finally:
-        # Para tudo com cuidado para evitar erros no __del__
         try:
             stop_motors()
             pwm_left.ChangeDutyCycle(0)
@@ -189,7 +181,6 @@ def main():
             pass
 
         print("Encerrado.")
-        
 
 if __name__ == "__main__":
     main()
