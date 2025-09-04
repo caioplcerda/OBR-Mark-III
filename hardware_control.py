@@ -147,7 +147,7 @@ class HardwareControl:
     INVERT_RIGHT = True
 
     # Modos
-    OPEN_LOOP = True           # PWM direto por padrão
+    OPEN_LOOP = False           # Alterado para False para usar controle fechado com encoders
     AUTO_FALLBACK_OPEN = True
     FALLBACK_CHECK_SEC = 0.7
 
@@ -169,7 +169,7 @@ class HardwareControl:
 
         self.dir_pid = PIDController(
             kp=self.config.get("pid", {}).get("kp", 0.9),
-            ki=self.config.get("pid", {}).get("ki", 0.005),
+            ki=self.config.get("pid", {}).get("ki", 0.0),  # Alterado de volta para 0.0 para reduzir agressividade nas curvas
             kd=self.config.get("pid", {}).get("kd", 0.14),
             sample_time=self.config.get("pid", {}).get("sample_time", 0.02)
         )
@@ -250,6 +250,9 @@ class HardwareControl:
         self.last_left_speed = int(left)
         self.last_right_speed = int(right)
 
+        # Log para debug (verifique no console do Pi)
+        print(f"[DEBUG] Set speeds: left={left:.1f}, right={right:.1f}, error={error:.1f}")
+
         # Open-loop por padrão
         if self.OPEN_LOOP or not self._encoders_ok:
             self._write_motor_pwm(left, right)
@@ -309,6 +312,9 @@ class HardwareControl:
 
                 self._write_motor_pwm(pwm_l, pwm_r)
 
+                # Log para debug encoders
+                print(f"[DEBUG] Encoders: target L/R={self.target_tps_l:.1f}/{self.target_tps_r:.1f}, meas L/R={self.meas_tps_l:.1f}/{self.meas_tps_r:.1f}, PWM L/R={pwm_l:.1f}/{pwm_r:.1f}")
+
             elapsed = time.time() - t0
             if elapsed < period:
                 time.sleep(period - elapsed)
@@ -335,6 +341,9 @@ class HardwareControl:
             self.GPIO.output(self.R_BIN1, 0)
             self.GPIO.output(self.R_BIN2, 1)
         self._pwm_right.ChangeDutyCycle(abs(right_cmd))
+
+        # Log para debug write
+        print(f"[DEBUG] Write PWM: left_cmd={left_cmd:.1f}, right_cmd={right_cmd:.1f}")
 
     # ---------- Servos ----------
     @staticmethod
