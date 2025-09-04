@@ -169,7 +169,7 @@ class HardwareControl:
 
         self.dir_pid = PIDController(
             kp=self.config.get("pid", {}).get("kp", 0.9),
-            ki=self.config.get("pid", {}).get("ki", 0.0),
+            ki=self.config.get("pid", {}).get("ki", 0.005),
             kd=self.config.get("pid", {}).get("kd", 0.14),
             sample_time=self.config.get("pid", {}).get("sample_time", 0.02)
         )
@@ -181,52 +181,41 @@ class HardwareControl:
         self._last_meas_t = time.time()
         self._last_ticks_l = 0; self._last_ticks_r = 0
         self._enc_dead_timer = None
+        self._ctrl_running = False
+        self._ctrl_th = None
 
-        self._ctrl_running = True
-        self._ctrl_th = threading.Thread(target=self._control_loop, daemon=True)
-        self._ctrl_th.start()
-
-    # ---------- IO ----------
     def _safe_setup_io(self):
-        # Motores
-        for pin in [self.L_BIN1,self.L_BIN2,self.R_BIN1,self.R_BIN2,self.STBY]:
-            self.GPIO.setup(pin, self.GPIO.OUT)
-        self.GPIO.setup(self.L_PWMB, self.GPIO.OUT)
-        self.GPIO.setup(self.R_PWMB, self.GPIO.OUT)
-
-        # PWM 500 Hz
-        self._pwm_left = self.GPIO.PWM(self.L_PWMB, 500)
-        self._pwm_right = self.GPIO.PWM(self.R_PWMB, 500)
-        self._pwm_left.start(0); self._pwm_right.start(0)
-
-        # STBY alto (no seu hardware já fica HIGH; garantimos)
-        self.GPIO.output(self.STBY, 1)
-
-        # Encoders (opcional)
         try:
-            self.GPIO.setup(self.ENCODER_A_L, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
-            self.GPIO.setup(self.ENCODER_A_R, self.GPIO.IN, pull_up_down=self.GPIO.PUD_UP)
-            self.GPIO.add_event_detect(self.ENCODER_A_L, self.GPIO.RISING, callback=self._enc_l)
-            self.GPIO.add_event_detect(self.ENCODER_A_R, self.GPIO.RISING, callback=self._enc_r)
-            self._encoders_ok = True
-        except Exception:
-            self._encoders_ok = False
+            self.GPIO.setup(self.STBY, self.GPIO.OUT)
+            self.GPIO.output(self.STBY, 1)
 
-    # ---------- Encoders ----------
-    def _enc_l(self, _): self._ticks_l += 1
-    def _enc_r(self, _): self._ticks_r += 1
+            for p in [self.L_BIN1, self.L_BIN2, self.R_BIN1, self.R_BIN2]:
+                self.GPIO.setup(p, self.GPIO.OUT)
+                self.GPIO.output(p, 0)
 
-    def reset_encoders(self):
-        self._ticks_l = 0; self._ticks_r = 0
-        self._last_ticks_l = 0; self._last_ticks_r = 0
-        self.meas_tps_l = 0.0; self.meas_tps_r = 0.0
+            self._pwm_left = self.GPIO.PWM(self.L_PWMB, 1000)
+            self._pwm_right = self.GPIO.PWM(self.R_PWMB, 1000)
+            self._pwm_left.start(0)
+            self._pwm_right.start(0)
 
-    def read_encoders(self): return self._ticks_l, self._ticks_r
-    def read_speeds_tps(self): return self.meas_tps_l, self.meas_tps_r
+            # Encoders
+            try:
+                def _tick_l(_pin): self._ticks_l += 1
+                def _tick_r(_pin): self._ticks_r += 1
+                self.GPIO.setup(self.ENCODER_A_L, self.GPIO.IN, self.GPIO.PUD_UP)
+                self.GPIO.setup(self.ENCODER_A_R, self.GPIO.IN, self.GPIO.PUD_UP)
+                self.GPIO.add_event_detect(self.ENCODER_A_L, self.GPIO.RISING, _tick_l)
+                self.GPIO.add_event_detect(self.ENCODER_A_R, self.GPIO.RISING, _tick_r)
+                self._encoders_ok = True
+                self._ctrl_running = True
+                self._ctrl_th = threading.Thread(target=self._control_loop, daemon=True)
+                self._ctrl_th.start()
+            except Exception as e:
+                self._encoders_ok = False
+        except Exception as e:
+            pass
 
-    # ---------- Util ----------
-    def _apply_deadband(self, cmd: float) -> float:
-        cmd = float(cmd)
+    def _apply_deadband(self, cmd):
         if cmd == 0.0:
             return 0.0
         a = abs(cmd)
@@ -249,9 +238,9 @@ class HardwareControl:
         right = max(-100.0, min(100.0, right))
 
         # Snap reto (erro pequeno)
-        if abs(error) < self.STRAIGHT_ERR_TH and abs(left - right) < self.STRAIGHT_MATCH_DELTA:
-            left = self.STRAIGHT_MIN_DUTY
-            right = self.STRAIGHT_MIN_DUTY
+        # if abs(error) < self.STRAIGHT_ERR_TH and abs(left - right) < self.STRAIGHT_MATCH_DELTA:
+        #     left = self.STRAIGHT_MIN_DUTY
+        #     right = self.STRAIGHT_MIN_DUTY
 
         # Deadband
         left = self._apply_deadband(left) if left != 0 else 0.0
