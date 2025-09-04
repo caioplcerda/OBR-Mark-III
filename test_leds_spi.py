@@ -16,8 +16,8 @@ RESET_US = 80             # >50us para reset do WS2812
 
 # Mapas: [0..6] = módulo 7 bits; [7..10] e [11..14] = módulos 4 bits
 SEG_7 = range(0, 7)
-SEG_4A = range(7, 11)
-SEG_4B = range(11, 15)
+SEG_4A = range(7, 14)
+SEG_4B = range(14, 18)
 
 # Intensidades
 WHITE_STRONG = (255, 255, 255)
@@ -91,10 +91,10 @@ def main():
     strip = WS2812_SPI(N_PIXELS, SPI_BUS, SPI_DEV, SPI_HZ, ORDER)
     try:
         # 7 primeiros: branco forte
-        for i in SEG_7:
+        for i in SEG_4A:
             strip.set_pixel(i, WHITE_STRONG)
         # 4+4: branco fraco
-        for i in SEG_4A:
+        for i in SEG_7:
             strip.set_pixel(i, WHITE_WEAK)
         for i in SEG_4B:
             strip.set_pixel(i, WHITE_WEAK)
@@ -105,7 +105,7 @@ def main():
         # Pequeno ciclo de status nos 4+4
         print("Ciclo de status nos 4+4...")
         def set_status(color):
-            for i in SEG_4A:
+            for i in SEG_7:
                 strip.set_pixel(i, color)
             for i in SEG_4B:
                 strip.set_pixel(i, color)
@@ -127,9 +127,9 @@ def main():
         set_status((100, 50, 0)); time.sleep(1)
 
         # volta ao padrão: 7 fortes + 4+4 fracos
-        for i in SEG_7:
-            strip.set_pixel(i, WHITE_STRONG)
         for i in SEG_4A:
+            strip.set_pixel(i, WHITE_STRONG)
+        for i in SEG_7:
             strip.set_pixel(i, WHITE_WEAK)
         for i in SEG_4B:
             strip.set_pixel(i, WHITE_WEAK)
