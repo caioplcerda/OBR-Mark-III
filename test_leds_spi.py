@@ -1,235 +1,239 @@
-#!/usr/bin/env python3
 # test_leds_spi.py
-# Três módulos WS2812 (7 LEDs cada) em série (total 21) usando SPI (spidev).
-# Mapeamento:
-#   segmento 0: "esquerda"  -> pixels  0..6
-#   segmento 1: "esquerda2" -> pixels  7..13
-#   segmento 2: "meio"      -> pixels 14..20
+# Três módulos WS2812 (7 LEDs cada) em série (DIN->DOUT->DOUT).
+# Mapeamento solicitado:
+#   seg 0 = ESQUERDA   -> pixels  0.. 6
+#   seg 1 = DIREITA    -> pixels  7..13
+#   seg 2 = MEIO       -> pixels 14..20
 #
-# Se algum bloco acende invertido, marque REVERSE_SEGMENT[seg] = True.
+# Backend:
+#   1) Preferência: SPI (neopixel_spi) em SPI0 MOSI (GPIO10 / pino 19)
+#   2) Fallback: rpi_ws281x (PWM) em GPIO12 (pino 32)
 #
-# Execução:
+# Execute de preferência com sudo para rpi_ws281x:
 #   sudo python3 test_leds_spi.py
-#
-# Notas:
-# - Usa codificação 1-wire do WS2812 por SPI com nibbles 0/1 -> 0b1000/0b1110 (timming compatível).
-# - Clock SPI recomendado: ~3.2 MHz (ajustável abaixo).
-# - Reset/latch é obtido enviando um "trailer" de zeros > 80 µs.
 
 import time
 import sys
-import spidev
 
-# ========= CONFIGURAÇÃO GERAL =========
-LED_COUNT        = 21                 # 3 x 7
-SEGMENT_SIZE     = 7
-SEGMENT_ORDER    = ["esquerda", "esquerda2", "meio"]  # rótulos (só informativo)
-REVERSE_SEGMENT  = [False, False, False]              # inverte ordem do segmento se True
+LED_COUNT = 21  # 3 x 7
 
-SPI_BUS          = 0
-SPI_DEV          = 0
-SPI_MAX_HZ       = 3_200_000          # ~3.2 MHz funciona bem na maioria dos Pi
-SPI_MODE         = 0
+# ---------- BACKENDS ----------
+BACKEND = None  # "SPI" ou "WS281X"
 
-# Brilho "global" simples (0.0..1.0) aplicado no software (não é como APA102)
-GLOBAL_BRIGHTNESS = 0.6
+# SPI (opcional)
+_SPI_OK = False
+try:
+    # Adafruit CircuitPython neopixel_spi
+    # pip: adafruit-circuitpython-neopixel-spi
+    import busio
+    import board
+    import neopixel_spi as neopixel
+    _SPI_OK = True
+except Exception:
+    _SPI_OK = False
 
-# Trailer para reset/latch do WS2812 (zeros suficientes > 80us).
-# A ~3.2MHz, 100 bytes de zero dão ~250us, folgado.
-RESET_TRAILER_LEN = 100
+# rpi_ws281x (fallback por PWM)
+_WS_OK = False
+try:
+    from rpi_ws281x import Adafruit_NeoPixel, Color
+    _WS_OK = True
+except Exception:
+    _WS_OK = False
 
-# ========= ENCODER WS2812 por SPI =========
-# Codificação por nibble (4 bits) para representar cada bit do WS2812:
-#   bit '0' -> 0b1000 (pulso curto)
-#   bit '1' -> 0b1110 (pulso longo)
-# Cada byte (8 bits) vira 8 nibbles (= 32 bits), que empacotamos em 4 bytes.
-# Portanto, para N LEDs (24 bytes RGB), o frame SPI tem 4x mais bytes + trailer.
 
-NIBBLE_0 = 0b1000
-NIBBLE_1 = 0b1110
+# ---------- CONFIG ----------
+# SPI: usa SPI0 MOSI (GPIO10 / pino físico 19), SCK (GPIO11 / pino 23)
+# brilho (0.0..1.0) no backend SPI; no WS281X é (0..255)
+SPI_BRIGHTNESS = 0.6
 
-def _byte_to_nibbles(b: int) -> int:
-    """Converte 8 bits (MSB->LSB) em 32 bits (8 nibbles) embalados num int de 32 bits."""
-    out = 0
-    for i in range(8):
-        bit = (b & (1 << (7 - i))) != 0
-        nib = NIBBLE_1 if bit else NIBBLE_0
-        out = (out << 4) | nib
-    return out
+# WS281X: PWM em GPIO12 (pino 32)
+WS_PIN         = 12
+WS_FREQ_HZ     = 800000
+WS_DMA         = 10
+WS_INVERT      = False
+WS_BRIGHTNESS  = 160  # 0..255
 
-def _pack32_to_bytes(x: int) -> bytes:
-    """Empacota um inteiro de 32 bits em 4 bytes (big-endian)."""
-    return bytes([(x >> 24) & 0xFF, (x >> 16) & 0xFF, (x >> 8) & 0xFF, x & 0xFF])
+# Ordem e nomes
+SEGMENT_NAMES = ["esquerda", "direita", "meio"]
 
-def encode_ws2812_frame(rgb_bytes: bytes) -> bytes:
-    """
-    Converte uma sequência de bytes GRB/WS2812 para o fluxo SPI codificado.
-    Esperado: ordem WS2812 = G, R, B (por LED).
-    """
-    buf = bytearray()
-    for b in rgb_bytes:
-        nib32 = _byte_to_nibbles(b)
-        buf.extend(_pack32_to_bytes(nib32))
-    # trailer de zeros para reset/latch
-    buf.extend(b"\x00" * RESET_TRAILER_LEN)
-    return bytes(buf)
+# Se algum bloco está fisicamente invertido (fio ao contrário), marque True
+# Índices: 0=esquerda, 1=direita, 2=meio
+REVERSE_SEGMENT = [False, False, False]
 
-# ========= FRAME BUFFER =========
-# WS2812 espera ordem G, R, B por LED.
-def clamp8(x: int) -> int:
-    return 0 if x < 0 else (255 if x > 255 else x)
 
-class WS2812_SPI:
-    def __init__(self, led_count: int):
-        self.n = led_count
-        # buffer lógico em GRB
-        self.buf = [(0, 0, 0)] * self.n  # (G, R, B)
-        self.spi = spidev.SpiDev()
-        self.spi.open(SPI_BUS, SPI_DEV)
-        self.spi.max_speed_hz = SPI_MAX_HZ
-        self.spi.mode = SPI_MODE
-        # Nota: spidev usa bytes-like; vamos enviar com writebytes/ xfer2.
+# ---------- ABSTRAÇÃO SIMPLES ----------
+class StripBase:
+    def show(self): ...
+    def set_pixel_rgb(self, i, r, g, b): ...
+    def blackout(self): ...
 
-    def set_pixel(self, idx: int, r: int, g: int, b: int, scale: float = GLOBAL_BRIGHTNESS):
-        if not (0 <= idx < self.n):
-            return
-        if scale is None:
-            scale = 1.0
-        r = clamp8(int(r * scale))
-        g = clamp8(int(g * scale))
-        b = clamp8(int(b * scale))
-        # guarda em GRB
-        self.buf[idx] = (g, r, b)
 
-    def fill(self, r: int, g: int, b: int, scale: float = GLOBAL_BRIGHTNESS):
-        for i in range(self.n):
-            self.set_pixel(i, r, g, b, scale)
-
-    def clear(self):
-        self.fill(0, 0, 0, scale=1.0)
+class StripSPI(StripBase):
+    def __init__(self, count, brightness=SPI_BRIGHTNESS):
+        # SPI0 padrão do Pi
+        # - board.SPI() já cria em SCK=GPIO11, MOSI=GPIO10
+        self.spi = busio.SPI(board.SCK, MOSI=board.MOSI)
+        # `neopixel.NeoPixel_SPI` assume ordem GRB
+        self.pixels = neopixel.NeoPixel_SPI(self.spi, count, brightness=brightness, auto_write=False)
+        self.count = count
 
     def show(self):
-        # Achata GRB em bytes
-        raw = bytearray()
-        for (g, r, b) in self.buf:
-            raw.extend((g & 0xFF, r & 0xFF, b & 0xFF))
-        payload = encode_ws2812_frame(bytes(raw))
-        # Envia; writebytes é adequado para buffers grandes
-        self.spi.writebytes(payload)
+        self.pixels.show()
 
-    def close(self):
+    def set_pixel_rgb(self, i, r, g, b):
+        if 0 <= i < self.count:
+            # CircuitPython usa ordem RGB
+            self.pixels[i] = (int(r), int(g), int(b))
+
+    def blackout(self):
+        for i in range(self.count):
+            self.pixels[i] = (0, 0, 0)
+        self.pixels.show()
+
+
+class StripWS(StripBase):
+    def __init__(self, count):
+        self.strip = Adafruit_NeoPixel(
+            count, WS_PIN, WS_FREQ_HZ, WS_DMA, WS_INVERT, WS_BRIGHTNESS
+        )
+        self.strip.begin()
+        self.count = count
+
+    def show(self):
+        self.strip.show()
+
+    def set_pixel_rgb(self, i, r, g, b):
+        if 0 <= i < self.count:
+            self.strip.setPixelColor(i, Color(int(r), int(g), int(b)))
+
+    def blackout(self):
+        for i in range(self.count):
+            self.strip.setPixelColor(i, 0)
+        self.strip.show()
+
+
+def make_strip():
+    global BACKEND
+    if _SPI_OK:
         try:
-            self.spi.close()
-        except Exception:
-            pass
+            s = StripSPI(LED_COUNT, brightness=SPI_BRIGHTNESS)
+            BACKEND = "SPI"
+            print("[LED] Backend: SPI (neopixel_spi)")
+            return s
+        except Exception as e:
+            print("[LED] Falha SPI:", e)
+    if _WS_OK:
+        try:
+            s = StripWS(LED_COUNT)
+            BACKEND = "WS281X"
+            print("[LED] Backend: rpi_ws281x (PWM GPIO12)")
+            return s
+        except Exception as e:
+            print("[LED] Falha rpi_ws281x:", e)
+    print("[LED] Nenhum backend disponível. Instale 'adafruit-circuitpython-neopixel-spi' (SPI) ou 'rpi_ws281x'.")
+    sys.exit(1)
 
-# ========= SEGMENTOS =========
+
+# ---------- UTIL ----------
 def seg_bounds(seg_index: int):
-    """Faixa de 7 LEDs para o segmento lógico (0..2)."""
-    start = seg_index * SEGMENT_SIZE
-    end = start + SEGMENT_SIZE - 1
+    """Faixa inclusiva de 7 LEDs por segmento."""
+    start = seg_index * 7
+    end = start + 6
     return start, end
 
-def set_segment(strip: WS2812_SPI, seg_index: int, r: int, g: int, b: int, scale: float = GLOBAL_BRIGHTNESS):
+def set_segment(strip: StripBase, seg_index: int, r: int, g: int, b: int):
+    """Pinta um segmento inteiro (7 LEDs) com (r,g,b)."""
     start, end = seg_bounds(seg_index)
     rng = list(range(start, end + 1))
     if REVERSE_SEGMENT[seg_index]:
         rng = list(reversed(rng))
     for i in rng:
-        strip.set_pixel(i, r, g, b, scale=scale)
+        strip.set_pixel_rgb(i, r, g, b)
 
-def white(strip: WS2812_SPI, seg_index: int, level: int):
-    level = clamp8(level)
-    set_segment(strip, seg_index, level, level, level, scale=1.0)
+def white(strip, seg_index: int, level: int):
+    level = max(0, min(255, level))
+    set_segment(strip, seg_index, level, level, level)
 
-def blackout(strip: WS2812_SPI):
-    strip.clear()
-    strip.show()
+def blackout(strip):
+    strip.blackout()
 
-def demo_identify(strip: WS2812_SPI):
+def demo_identify(strip):
+    """Liga cores distintas por bloco para conferir o mapeamento solicitado."""
     # esquerda = vermelho
-    set_segment(strip, 0, 255, 0, 0, scale=1.0)
-    # esquerda2 = verde
-    set_segment(strip, 1, 0, 255, 0, scale=1.0)
+    set_segment(strip, 0, 255, 0, 0)
+    # direita = verde
+    set_segment(strip, 1, 0, 255, 0)
     # meio = azul
-    set_segment(strip, 2, 0, 0, 255, scale=1.0)
+    set_segment(strip, 2, 0, 0, 255)
     strip.show()
-    print("Identificação: esquerda=VERMELHO, esquerda2=VERDE, meio=AZUL")
+    print("Identificação: esquerda=VERMELHO, direita=VERDE, meio=AZUL")
     time.sleep(2.0)
 
-def demo_chase(strip: WS2812_SPI, seg_index: int, loops=2, delay=0.07, color=(255,255,255)):
-    r, g, b = color
+def demo_chase(strip, seg_index: int, loops=2, delay=0.07, color=(255,255,255)):
+    r,g,b = color
     start, end = seg_bounds(seg_index)
-    seq = list(range(start, end + 1))
+    seq = list(range(start, end+1))
     if REVERSE_SEGMENT[seg_index]:
         seq = list(reversed(seq))
     for _ in range(loops):
         for i in range(len(seq)):
-            # apaga segmento
+            # apaga bloco
             for j in seq:
-                strip.set_pixel(j, 0, 0, 0, scale=1.0)
-            # acende cabeça
-            strip.set_pixel(seq[i], r, g, b, scale=1.0)
+                strip.set_pixel_rgb(j, 0, 0, 0)
+            # acende a "cabeça"
+            strip.set_pixel_rgb(seq[i], r, g, b)
             strip.show()
             time.sleep(delay)
 
-# ========= MAIN =========
 def main():
-    print("== Teste WS2812 via SPI (3x7 LEDs) ==")
-    print("SPI: /dev/spidev%d.%d @ %d Hz" % (SPI_BUS, SPI_DEV, SPI_MAX_HZ))
-    print("Ordem lógica:", SEGMENT_ORDER)
-    print("Reverse flags:", REVERSE_SEGMENT)
-
-    strip = WS2812_SPI(LED_COUNT)
+    strip = make_strip()
+    blackout(strip)
 
     try:
-        blackout(strip)
+        print("== Teste LEDs (3 módulos x 7) ==")
+        print("Ordem:", SEGMENT_NAMES)
+        print("Reverse:", REVERSE_SEGMENT)
+        print("Backend:", BACKEND)
 
-        # Passo 1: identificar blocos com cores
+        # Passo 1: identificar blocos
         demo_identify(strip)
 
         # Passo 2: todos fracos (status base)
-        for seg in range(3):
-            white(strip, seg, 40)   # fraco
+        for idx in range(3):
+            white(strip, idx, 40)
         strip.show()
         time.sleep(1.2)
 
-        # Passo 3: “forte” por segmento para conferir mapeamento
-        for seg, name in enumerate(SEGMENT_ORDER):
-            print(f"Fortalecendo {name}...")
-            white(strip, seg, 220)   # forte
+        # Passo 3: reforça um por vez
+        for idx, name in enumerate(SEGMENT_NAMES):
+            print(f"- Intensificando {name}...")
+            white(strip, idx, 220)
             strip.show()
-            time.sleep(1.2)
-            white(strip, seg, 40)    # volta fraco
+            time.sleep(1.0)
+            white(strip, idx, 40)
             strip.show()
             time.sleep(0.3)
 
-        # Passo 4: chase para ver orientação física
-        for seg, name in enumerate(SEGMENT_ORDER):
-            print(f"Chase em {name}...")
-            demo_chase(strip, seg, loops=2, delay=0.06, color=(255,255,255))
+        # Passo 4: chase por bloco (checar orientação)
+        for idx, name in enumerate(SEGMENT_NAMES):
+            print(f"- Chase {name}")
+            demo_chase(strip, idx, loops=2, delay=0.06, color=(255,255,255))
+            time.sleep(0.25)
 
-        print("Ajuste REVERSE_SEGMENT se a direção estiver invertida em algum bloco.")
-        print("Deixando todos fracos no final...")
-        for seg in range(3):
-            white(strip, seg, 40)
+        print("Se algum bloco correu ao contrário, marque REVERSE_SEGMENT[índice]=True.")
+        print("Ctrl+C para sair; deixo fraco no final.")
+        for idx in range(3):
+            white(strip, idx, 40)
         strip.show()
 
-        print("Ctrl+C para sair.")
         while True:
             time.sleep(1.0)
 
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            blackout(strip)
-        except Exception:
-            pass
-        try:
-            strip.close()
-        except Exception:
-            pass
+        blackout(strip)
+        time.sleep(0.05)
 
 if __name__ == "__main__":
     main()
