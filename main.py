@@ -16,7 +16,7 @@ from collections import deque
 USE_LEDS = False
 
 # ==== Estado WEB ====
-WEB_AVAILABLE = False
+WEB_AVAILABLE = True
 SHARED_STATE = {
     "config": {},
     "last_frame": None,
