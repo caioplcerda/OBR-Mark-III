@@ -274,6 +274,15 @@ class HardwareControl:
         self.target_tps_r = 0.0
         self._write_motor_pwm(0.0, 0.0)
 
+    def get_ticks(self):
+        """Retorna uma tupla com os ticks acumulados (esquerda, direita)."""
+        return int(self._ticks_l), int(self._ticks_r)
+
+    def reset_ticks(self):
+        """Zera contadores de ticks."""
+        self._ticks_l = 0
+        self._ticks_r = 0
+
     def _control_loop(self):
         period = 1.0 / float(self.CONTROL_HZ)
         pwm_l = 0.0; pwm_r = 0.0

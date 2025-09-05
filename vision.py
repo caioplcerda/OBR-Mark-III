@@ -66,6 +66,10 @@ class Vision:
 
         mask = cv2.inRange(hsv, lower1, upper1)
 
+        # Considerar apenas a parte inferior do frame para evitar leituras precoces
+        roi_top = int(H * 0.6)
+        mask[:roi_top, :] = 0
+
         # Ignorar margens laterais
         mask[:, :margin] = 0
         mask[:, W - margin:] = 0
