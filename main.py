@@ -183,6 +183,9 @@ class Robot:
     INTERSECT_AHEAD_DEBOUNCE = 3
 
     GREEN_DEBOUNCE = 2
+    INTERSECT_FWD_SEC = 0.5
+    TURN90_FWD_SEC = 0.2
+    TURN90_TURN_SEC = 0.7
     MAX_GAP_FRAMES = 8
     LINE_LOSS_GRACE_FRAMES = 12
 
@@ -552,6 +555,9 @@ class Robot:
                         if getattr(self, "leds", None):
                             try: self.leds.status_turn("uturn")
                             except Exception: pass
+                        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+                        time.sleep(self.INTERSECT_FWD_SEC)
+                        self.hardware.stop()
                         t0 = time.time(); timeout = 3.0
                         while time.time() - t0 < timeout and self.running:
                             try:
@@ -567,18 +573,25 @@ class Robot:
                         self.planned_direction = None
                         continue
                     elif confirmed_green in ("left", "right"):
-                        self.planned_direction = confirmed_green
-                        self.turning_until = now + 0.7
                         if getattr(self, "leds", None):
                             try: self.leds.status_turn(confirmed_green)
                             except Exception: pass
+                        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+                        time.sleep(self.TURN90_FWD_SEC)
+                        self.hardware.stop()
+                        self.planned_direction = confirmed_green
+                        self.turning_until = time.time() + self.TURN90_TURN_SEC
                         self._green_seen = 0; self._intersect_seen = 0
+                        continue
                     else:
-                        self.planned_direction = "straight"
-                        self.turning_until = now + 0.4
                         if getattr(self, "leds", None):
                             try: self.leds.status_following()
                             except Exception: pass
+                        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+                        time.sleep(self.INTERSECT_FWD_SEC)
+                        self.hardware.stop()
+                        self._intersect_seen = 0
+                        continue
 
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
