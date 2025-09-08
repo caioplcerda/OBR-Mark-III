@@ -1,17 +1,19 @@
 from flask import Flask, request, render_template_string
-from gpiozero import Servo
-from time import sleep
+import pigpio
+import time
 
 app = Flask(__name__)
+pi = pigpio.pi()  # inicia daemon pigpio
 
+# Template HTML
 html_template = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Controle de Servo</title>
+    <title>Controle de Servos</title>
 </head>
 <body>
-    <h1>Controle de Servo SG90</h1>
+    <h1>Controle de Servos SG90 e MG996R</h1>
     <form method="POST" action="/set_angle">
         <label for="gpio">GPIO (BCM):</label>
         <input type="number" id="gpio" name="gpio" required><br><br>
@@ -25,12 +27,6 @@ html_template = """
 </html>
 """
 
-servos = {}
-
-def angle_to_value(angle):
-    # Converte 0-180° para valor -1 a 1 do gpiozero
-    return (angle / 90) - 1
-
 @app.route("/")
 def index():
     return render_template_string(html_template)
@@ -40,17 +36,19 @@ def set_angle():
     gpio = int(request.form["gpio"])
     angle = float(request.form["angle"])
 
-    if gpio not in servos:
-        servo = Servo(gpio)
-        servos[gpio] = servo
-    else:
-        servo = servos[gpio]
-
-    servo.value = angle_to_value(angle)
-    sleep(0.5)
-    servo.detach()  # evita tremores
+    # Converte ângulo em pulse width (µs)
+    pulse = 500 + (angle / 180.0) * 2000
+    pi.set_servo_pulsewidth(gpio, pulse)
+    time.sleep(0.5)
+    pi.set_servo_pulsewidth(gpio, 0)  # desliga servo para não tremer
 
     return f"Servo no GPIO {gpio} ajustado para {angle}°"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=True)
+    finally:
+        # Desliga todos os servos
+        for gpio in [16, 17, 18, 19]:  # coloque aqui os pinos dos seus servos
+            pi.set_servo_pulsewidth(gpio, 0)
+        pi.stop()
