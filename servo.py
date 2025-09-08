@@ -8,18 +8,18 @@ html_template = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Controle de Servo</title>
+    <title>Servo Control</title>
 </head>
 <body>
-    <h1>Controle de Servo SG90</h1>
-    <form method="POST" action="/set_angle">
+    <h1>SG90 Servo Control with PWM</h1>
+    <form method="POST" action="/set_pulse_width">
         <label for="gpio">GPIO (BCM):</label>
         <input type="number" id="gpio" name="gpio" required><br><br>
 
-        <label for="angle">Ângulo (0 a 180):</label>
-        <input type="number" id="angle" name="angle" min="0" max="180" required><br><br>
+        <label for="pulse_width">Pulse Width (ms):</label>
+        <input type="number" id="pulse_width" name="pulse_width" min="0.5" max="2.5" step="0.1" required><br><br>
 
-        <button type="submit">Enviar</button>
+        <button type="submit">Set Pulse Width</button>
     </form>
 </body>
 </html>
@@ -27,30 +27,28 @@ html_template = """
 
 servos = {}
 
-def angle_to_value(angle):
-    # Converte 0-180° para valor -1 a 1 do gpiozero
-    return (angle / 90) - 1
-
 @app.route("/")
 def index():
     return render_template_string(html_template)
 
-@app.route("/set_angle", methods=["POST"])
-def set_angle():
+@app.route("/set_pulse_width", methods=["POST"])
+def set_pulse_width():
     gpio = int(request.form["gpio"])
-    angle = float(request.form["angle"])
+    pulse_width = float(request.form["pulse_width"])
 
     if gpio not in servos:
-        servo = Servo(gpio)
+        # SG90 datasheet says pulse width is 0.5ms to 2.4ms, but we'll use a slightly wider range
+        # to be safe. Gpiozero expects pulse width in seconds.
+        servo = Servo(gpio, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
         servos[gpio] = servo
     else:
         servo = servos[gpio]
 
-    servo.value = angle_to_value(angle)
+    servo.pulse_width = pulse_width / 1000  # Convert ms to seconds
     sleep(0.5)
-    servo.detach()  # evita tremores
+    servo.detach()  # avoids jitter
 
-    return f"Servo no GPIO {gpio} ajustado para {angle}°"
+    return f"Servo on GPIO {gpio} set to {pulse_width}ms pulse width"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
