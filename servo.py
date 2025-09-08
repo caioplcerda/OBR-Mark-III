@@ -1,14 +1,9 @@
 from flask import Flask, request, render_template_string
-import RPi.GPIO as GPIO
-import time
+from gpiozero import Servo
+from time import sleep
 
 app = Flask(__name__)
 
-# Configuração inicial do GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
-
-# Template HTML simples
 html_template = """
 <!DOCTYPE html>
 <html>
@@ -17,12 +12,12 @@ html_template = """
 </head>
 <body>
     <h1>Controle de Servo SG90</h1>
-    <form method="POST" action="/set_pwm">
+    <form method="POST" action="/set_angle">
         <label for="gpio">GPIO (BCM):</label>
         <input type="number" id="gpio" name="gpio" required><br><br>
 
-        <label for="pwm">PWM (duty cycle 2.5 a 12.5):</label>
-        <input type="number" id="pwm" name="pwm" step="0.1" required><br><br>
+        <label for="angle">Ângulo (0 a 180):</label>
+        <input type="number" id="angle" name="angle" min="0" max="180" required><br><br>
 
         <button type="submit">Enviar</button>
     </form>
@@ -30,37 +25,32 @@ html_template = """
 </html>
 """
 
-# Guardar servos ativos para não recriar PWM toda hora
 servos = {}
+
+def angle_to_value(angle):
+    # Converte 0-180° para valor -1 a 1 do gpiozero
+    return (angle / 90) - 1
 
 @app.route("/")
 def index():
     return render_template_string(html_template)
 
-@app.route("/set_pwm", methods=["POST"])
-def set_pwm():
+@app.route("/set_angle", methods=["POST"])
+def set_angle():
     gpio = int(request.form["gpio"])
-    duty = float(request.form["pwm"])
+    angle = float(request.form["angle"])
 
-    # Se não existir PWM ainda nesse pino, cria
     if gpio not in servos:
-        GPIO.setup(gpio, GPIO.OUT)
-        pwm = GPIO.PWM(gpio, 50)  # SG90 = 50Hz
-        pwm.start(0)
-        servos[gpio] = pwm
+        servo = Servo(gpio)
+        servos[gpio] = servo
     else:
-        pwm = servos[gpio]
+        servo = servos[gpio]
 
-    pwm.ChangeDutyCycle(duty)
-    time.sleep(0.5)  # tempo para o servo ir até posição
-    pwm.ChangeDutyCycle(0)  # para não ficar tremendo
+    servo.value = angle_to_value(angle)
+    sleep(0.5)
+    servo.detach()  # evita tremores
 
-    return f"Servo no GPIO {gpio} ajustado para duty {duty}"
+    return f"Servo no GPIO {gpio} ajustado para {angle}°"
 
 if __name__ == "__main__":
-    try:
-        app.run(host="0.0.0.0", port=5000, debug=True)
-    finally:
-        for pwm in servos.values():
-            pwm.stop()
-        GPIO.cleanup()
+    app.run(host="0.0.0.0", port=5000, debug=True)
