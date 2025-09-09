@@ -14,7 +14,7 @@ from datetime import datetime
 from collections import deque
 
 # ===== LEDs OFF por segurança (evitar travar PWM) =====
-USE_LEDS = False
+USE_LEDS = True
 
 # ==== Estado WEB ====
 WEB_AVAILABLE = True
