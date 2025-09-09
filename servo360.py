@@ -1,7 +1,7 @@
 from gpiozero import Servo
 from time import sleep
 
-servo = Servo(18)  # change to your GPIO pin
+servo = Servo(26)  # change to your GPIO pin
 
 try:
     print("Moving to min")
