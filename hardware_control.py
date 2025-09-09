@@ -129,7 +129,7 @@ class HardwareControl:
     VEL_PID_R = dict(kp=0.25, ki=0.35, kd=0.0, sample_time=1.0/CONTROL_HZ)
 
     # Servos
-    SERVO_PINS = [7, 18, 16, 20]
+    SERVO_PINS = [26, 18, 16, 20]
     SERVO_FREQ_HZ = 50
     SERVO_AB_US = [{"A":1000,"B":2000} for _ in range(4)]
 
