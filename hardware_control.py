@@ -131,7 +131,12 @@ class HardwareControl:
     # Servos
     SERVO_PINS = [26, 18, 16, 20]
     SERVO_FREQ_HZ = 50
-    SERVO_AB_US = [{"A":1000,"B":2000} for _ in range(4)]
+    SERVO_AB_US = [
+        {"A": 1000, "B": 2000, "C": 1200, "D": 1800},
+        {"A": 900, "B": 2100},
+        {"A": 1100, "B": 1900},
+        {"A": 950, "B": 2050}
+    ]
 
     # TB6612B pinos
     L_BIN1, L_BIN2, L_PWMB = 17, 27, 22
@@ -164,6 +169,7 @@ class HardwareControl:
 
         self._pwm_left = None; self._pwm_right = None
         self._servo_pwm = [None]*4; self._servo_ready=[False]*4
+        self._servo_pos = ['A'] * 4
 
         self._safe_setup_io()
 
@@ -366,12 +372,12 @@ class HardwareControl:
         return True
     def set_servo(self, index, pos, smooth_ms=0):
         i = index - 1
-        if not (0 <= i < 4) or pos not in ("A","B"):
+        if not (0 <= i < 4) or pos not in self.SERVO_AB_US[i]:
             return False
         target = int(self.SERVO_AB_US[i][pos])
         if smooth_ms > 0:
-            other = 'A' if pos == 'B' else 'B'
-            start = int(self.SERVO_AB_US[i][other])
+            start_pos_name = self._servo_pos[i]
+            start = int(self.SERVO_AB_US[i][start_pos_name])
             steps = max(3, int(smooth_ms / 20))
             for t in range(steps + 1):
                 u = int(start + (target - start) * (t / steps))
@@ -379,6 +385,7 @@ class HardwareControl:
                 time.sleep(0.02)
         else:
             self._servo_write_us(index, target)
+        self._servo_pos[i] = pos
         return True
     def set_servos(self, positions=('A','A','A','A'), smooth_ms=0):
         for idx, p in enumerate(positions, start=1):
