@@ -1,10 +1,10 @@
 from flask import Flask, request, render_template_string
-from gpiozero import AngularServo
+import pigpio
 from time import sleep
 
 app = Flask(__name__)
 
-# HTML completo
+# HTML do formulário
 html_template = """
 <!DOCTYPE html>
 <html>
@@ -26,7 +26,17 @@ html_template = """
 </html>
 """
 
+# Inicializa pigpio
+pi = pigpio.pi()
+if not pi.connected:
+    raise RuntimeError("Não foi possível conectar ao daemon pigpio. Execute 'sudo pigpiod'.")
+
+# Armazena servos já usados
 servos = {}
+
+# Converte ângulo 0–180 para pulso 500–2500 µs
+def angle_to_pulse(angle):
+    return 500 + (angle / 180) * 2000
 
 @app.route("/")
 def index():
@@ -37,22 +47,23 @@ def set_angle():
     gpio = int(request.form["gpio"])
     angle = float(request.form["angle"])
 
+    # Ativa o servo se ainda não estiver ativado
     if gpio not in servos:
-        servo = AngularServo(
-            gpio,
-            min_angle=0,
-            max_angle=180,
-            min_pulse_width=0.0005,  # ajuste se necessário
-            max_pulse_width=0.0025   # ajuste se necessário
-        )
-        servos[gpio] = servo
-    else:
-        servo = servos[gpio]
+        servos[gpio] = True  # apenas marca que foi usado
 
-    servo.angle = angle
-    sleep(0.5)
+    pulse = angle_to_pulse(angle)
+    pi.set_servo_pulsewidth(gpio, pulse)
+    sleep(0.5)  # tempo para o servo se mover
 
     return f"Servo no GPIO {gpio} ajustado para {angle}°"
+
+# Desliga todos os servos ao fechar o servidor
+@app.route("/shutdown", methods=["GET"])
+def shutdown():
+    for gpio in servos:
+        pi.set_servo_pulsewidth(gpio, 0)
+    pi.stop()
+    return "Servos desligados e daemon pigpio parado."
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
