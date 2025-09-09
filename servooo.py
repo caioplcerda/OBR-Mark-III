@@ -1,78 +1,58 @@
 from flask import Flask, request, render_template_string
-import pigpio
+from gpiozero import AngularServo
 from time import sleep
-import atexit
 
 app = Flask(__name__)
 
-# HTML do formulário
+# HTML completo
 html_template = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Controle de Servo (PWM)</title>
+    <title>Controle de Servo</title>
 </head>
 <body>
-    <h1>Controle de Servo por PWM</h1>
-    <form method="POST" action="/set_pwm">
+    <h1>Controle de Servo</h1>
+    <form method="POST" action="/set_angle">
         <label for="gpio">GPIO (BCM):</label>
         <input type="number" id="gpio" name="gpio" required><br><br>
 
-        <label for="pwm">Valor PWM (500-2500):</label>
-        <input type="number" id="pwm" name="pwm" min="500" max="2500" required><br><br>
+        <label for="angle">Ângulo (0 a 180):</label>
+        <input type="number" id="angle" name="angle" min="0" max="180" required><br><br>
 
         <button type="submit">Enviar</button>
-    </form>
-    <hr>
-    <form method="POST" action="/shutdown">
-        <button type="submit">Desligar Todos os Servos</button>
     </form>
 </body>
 </html>
 """
 
-# Inicializa pigpio
-pi = pigpio.pi()
-if not pi.connected:
-    raise RuntimeError("Não foi possível conectar ao daemon pigpio. Execute 'sudo pigpiod'.")
-
-# Armazena servos já usados
 servos = {}
-
-def cleanup():
-    """Desliga todos os servos que foram ativados."""
-    print("Desligando servos...")
-    for gpio in servos:
-        pi.set_servo_pulsewidth(gpio, 0)
-    servos.clear()
-    print("Servos desligados.")
-
-# Registra a função de limpeza para ser chamada ao sair
-atexit.register(cleanup)
 
 @app.route("/")
 def index():
     return render_template_string(html_template)
 
-@app.route("/set_pwm", methods=["POST"])
-def set_pwm():
+@app.route("/set_angle", methods=["POST"])
+def set_angle():
     gpio = int(request.form["gpio"])
-    pwm = int(request.form["pwm"])
+    angle = float(request.form["angle"])
 
-    # Ativa o servo se ainda não estiver ativado
     if gpio not in servos:
-        servos[gpio] = True  # apenas marca que foi usado
+        servo = AngularServo(
+            gpio,
+            min_angle=0,
+            max_angle=180,
+            min_pulse_width=0.0005,  # ajuste se necessário
+            max_pulse_width=0.0025   # ajuste se necessário
+        )
+        servos[gpio] = servo
+    else:
+        servo = servos[gpio]
 
-    pi.set_servo_pulsewidth(gpio, pwm)
-    sleep(0.5)  # tempo para o servo se mover
+    servo.angle = angle
+    sleep(0.5)
 
-    return f"Servo no GPIO {gpio} ajustado para PWM {pwm}"
-
-# Desliga todos os servos ao fechar o servidor
-@app.route("/shutdown", methods=["POST"])
-def shutdown():
-    cleanup()
-    return "Todos os servos foram desligados."
+    return f"Servo no GPIO {gpio} ajustado para {angle}°"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
