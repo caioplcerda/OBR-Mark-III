@@ -4,7 +4,27 @@ from time import sleep
 
 app = Flask(__name__)
 
-html_template = """..."""  # mesmo HTML
+# HTML completo
+html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Controle de Servo</title>
+</head>
+<body>
+    <h1>Controle de Servo</h1>
+    <form method="POST" action="/set_angle">
+        <label for="gpio">GPIO (BCM):</label>
+        <input type="number" id="gpio" name="gpio" required><br><br>
+
+        <label for="angle">Ângulo (0 a 180):</label>
+        <input type="number" id="angle" name="angle" min="0" max="180" required><br><br>
+
+        <button type="submit">Enviar</button>
+    </form>
+</body>
+</html>
+"""
 
 servos = {}
 
@@ -18,7 +38,6 @@ def set_angle():
     angle = float(request.form["angle"])
 
     if gpio not in servos:
-        # calibrando pulso mínimo e máximo
         servo = AngularServo(
             gpio,
             min_angle=0,
@@ -32,7 +51,6 @@ def set_angle():
 
     servo.angle = angle
     sleep(0.5)
-    # servo.detach()  # opcional, só se quiser soltar
 
     return f"Servo no GPIO {gpio} ajustado para {angle}°"
 
