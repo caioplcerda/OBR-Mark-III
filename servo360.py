@@ -1,20 +1,16 @@
-from gpiozero import Servo
-from time import sleep
+import pigpio
+import time
 
-servo = Servo(26)  # change to your GPIO pin
+pi = pigpio.pi()
+SERVO_PIN = 18  # GPIO pin
 
-try:
-    print("Moving to min")
-    servo.min()
-    sleep(1)
+# 1000 µs = 0°, 1500 µs = 90°, 2000 µs = 180°
+pi.set_servo_pulsewidth(SERVO_PIN, 1000)
+time.sleep(1)
+pi.set_servo_pulsewidth(SERVO_PIN, 1500)
+time.sleep(1)
+pi.set_servo_pulsewidth(SERVO_PIN, 2000)
+time.sleep(1)
 
-    print("Moving to mid")
-    servo.mid()
-    sleep(1)
-
-    print("Moving to max")
-    servo.max()
-    sleep(1)
-
-finally:
-    print("Test complete")
+pi.set_servo_pulsewidth(SERVO_PIN, 0)  # stop signal
+pi.stop()
