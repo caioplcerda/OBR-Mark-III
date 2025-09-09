@@ -1,22 +1,24 @@
-import RPi.GPIO as GPIO
+import lgpio
 import time
-from flask import Flask, Response, render_template_string
+from flask import Flask, render_template_string
 
-# GPIO setup
-GPIO.setmode(GPIO.BCM)
-
+# GPIO pins
 TRIG = 12
 ECHO = 6
 STATE_PIN = 13
 
-GPIO.setup(TRIG, GPIO.OUT)
-GPIO.setup(ECHO, GPIO.IN)
-GPIO.setup(STATE_PIN, GPIO.IN)
+# Open GPIO chip
+h = lgpio.gpiochip_open(0)
+
+# Setup pins
+lgpio.gpio_claim_output(h, TRIG)
+lgpio.gpio_claim_input(h, ECHO)
+lgpio.gpio_claim_input(h, STATE_PIN)
 
 # Flask setup
 app = Flask(__name__)
 
-# HTML template with auto-refreshing stream
+# HTML template
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -37,31 +39,27 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
 def read_distance():
-    # Ensure trigger is low
-    GPIO.output(TRIG, False)
+    # Ensure trigger low
+    lgpio.gpio_write(h, TRIG, 0)
     time.sleep(0.0002)
 
-    # Send 10us pulse
-    GPIO.output(TRIG, True)
+    # Send 10µs pulse
+    lgpio.gpio_write(h, TRIG, 1)
     time.sleep(0.00001)
-    GPIO.output(TRIG, False)
+    lgpio.gpio_write(h, TRIG, 0)
 
     # Wait for echo start
-    while GPIO.input(ECHO) == 0:
+    while lgpio.gpio_read(h, ECHO) == 0:
         pulse_start = time.time()
 
     # Wait for echo end
-    while GPIO.input(ECHO) == 1:
+    while lgpio.gpio_read(h, ECHO) == 1:
         pulse_end = time.time()
 
     pulse_duration = pulse_end - pulse_start
-    distance = pulse_duration * 17150  # speed of sound (cm/s)
-    distance = round(distance, 2)
-
-    return distance
-
+    distance = pulse_duration * 17150  # cm
+    return round(distance, 2)
 
 @app.route('/')
 def index():
@@ -70,14 +68,13 @@ def index():
     except Exception:
         distance = "Error"
 
-    state = "HIGH" if GPIO.input(STATE_PIN) else "LOW"
+    state = "HIGH" if lgpio.gpio_read(h, STATE_PIN) else "LOW"
     return render_template_string(HTML_TEMPLATE, distance=distance, state=state)
-
 
 if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=5000, debug=False)
     except KeyboardInterrupt:
-        GPIO.cleanup()
+        lgpio.gpiochip_close(h)
     finally:
-        GPIO.cleanup()
+        lgpio.gpiochip_close(h)
