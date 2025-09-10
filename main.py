@@ -214,8 +214,8 @@ class Robot:
             try:
                 self.leds = LedController(pin=12, brightness=150)
                 if self.leds and self.leds.enabled:
-                    # Turn LEDs off on startup, they will be enabled by start()
-                    self.leds.set_all(0, 0, 0)
+                    # Set all LEDs to medium white on startup
+                    self.leds.set_all(180, 180, 180)
             except Exception as e:
                 self.leds = None
                 log(f"LEDs desabilitados: {e}")
@@ -246,10 +246,6 @@ class Robot:
         if self.running:
             log("Robô já está rodando.")
             return
-
-        if getattr(self, "leds", None) and self.leds.enabled:
-            self.leds.set_all(180, 180, 180)
-
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -258,8 +254,6 @@ class Robot:
 
     def stop(self):
         self.running = False
-        if getattr(self, "leds", None) and self.leds.enabled:
-            self.leds.set_all(0, 0, 0)
         SHARED_STATE["status"] = "stopped"
         try: self.hardware.stop()
         except Exception: pass
