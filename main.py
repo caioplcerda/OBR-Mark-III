@@ -186,6 +186,7 @@ class Robot:
     INTERSECTION_WIDTH_FRAC = 0.55
     INTERSECT_DEBOUNCE = 4
     INTERSECT_AHEAD_DEBOUNCE = 3
+    C90_DEBOUNCE = 4
 
     GREEN_DEBOUNCE = 2
     TICKS_PER_REV = 36
@@ -194,6 +195,7 @@ class Robot:
     INTERSECT_FWD_TICKS = 45
     TURN90_FWD_TICKS = 18
     TURN90_TURN_TICKS = 63
+    TURN90_TIMEOUT_S = 2.5
     MAX_GAP_FRAMES = 8
     LINE_LOSS_GRACE_FRAMES = 12
 
@@ -220,10 +222,12 @@ class Robot:
         self.history = deque(maxlen=5)
         self._intersect_seen = 0
         self._intersect_ahead_seen = 0
+        self._c90_seen = 0
         self._green_seen = 0
         self._green_last = None
         self.planned_direction = None
         self.turning_until_ticks = 0
+        self.turning_start_time = 0
         self._gap_frames_left = 0
         self._line_loss_grace = 0
 
@@ -336,25 +340,41 @@ class Robot:
             right = int(max(-100, min(100, base_speed + error)))
             self.hardware.set_motor_speed(left, right)
 
-    def _forward_ticks(self, ticks: int):
+    def _forward_ticks(self, ticks: int, timeout_s: float = 2.0):
         start_l, start_r = self.hardware.get_ticks()
         self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+        start_time = time.time()
         while self.running:
+            # Condição de tempo
+            if time.time() - start_time > timeout_s:
+                log(f"Timeout em _forward_ticks ({timeout_s}s)")
+                break
+            # Condição de ticks
             tl, tr = self.hardware.get_ticks()
             if (tl - start_l) >= ticks and (tr - start_r) >= ticks:
                 break
             time.sleep(0.005)
+            if not self.running:
+                break
         self.hardware.stop()
 
-    def _turn_in_place_ticks(self, direction: str, ticks: int):
+    def _turn_in_place_ticks(self, direction: str, ticks: int, timeout_s: float = 3.0):
         start_l, start_r = self.hardware.get_ticks()
         bias = 120 if direction == "left" else -120
+        start_time = time.time()
         while self.running:
+            # Condição de tempo
+            if time.time() - start_time > timeout_s:
+                log(f"Timeout em _turn_in_place_ticks ({timeout_s}s)")
+                break
+            # Condição de ticks
             self.hardware.set_motor_speed(0, bias)
             tl, tr = self.hardware.get_ticks()
             if max(tl - start_l, tr - start_r) >= ticks:
                 break
             time.sleep(0.005)
+            if not self.running:
+                break
         self.hardware.stop()
 
     # ---- visão (binarização, centróides, etc) ----
@@ -472,7 +492,7 @@ class Robot:
             cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
         txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
         if is_intersection: txt += "  INT"
-        if is_curve90: txt += "  C90"
+        if confirmed_curve90: txt += "  C90"
         if is_ahead: txt += "  AHEAD"
         if green_dir: txt += f"  GREEN:{green_dir}"
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
@@ -500,6 +520,10 @@ class Robot:
                 if is_ahead: self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
                 else:        self._intersect_ahead_seen = 0
                 confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
+
+                if is_curve90: self._c90_seen = min(self._c90_seen + 1, 10)
+                else:          self._c90_seen = 0
+                confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
                 if getattr(self, "leds", None):
                     try:
                         self.leds.status_ahead() if confirmed_ahead else self.leds.status_ok()
@@ -577,13 +601,13 @@ class Robot:
                 else:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
-                if confirmed_intersection and not is_curve90:
+                if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         if getattr(self, "leds", None):
                             try: self.leds.status_turn("uturn")
                             except Exception: pass
-                        self._forward_ticks(self.INTERSECT_FWD_TICKS)
-                        self._turn_in_place_ticks("left", self.TURN90_TURN_TICKS * 2)
+                        self._forward_ticks(self.INTERSECT_FWD_TICKS, timeout_s=3.0)
+                        self._turn_in_place_ticks("left", self.TURN90_TURN_TICKS * 2, timeout_s=4.0)
                         self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         self.planned_direction = None
                         continue
@@ -591,29 +615,36 @@ class Robot:
                         if getattr(self, "leds", None):
                             try: self.leds.status_turn(confirmed_green)
                             except Exception: pass
-                        self._forward_ticks(self.TURN90_FWD_TICKS)
+                        self._forward_ticks(self.TURN90_FWD_TICKS, timeout_s=2.5)
                         self.planned_direction = confirmed_green
                         curr = max(self.hardware.get_ticks())
                         self.turning_until_ticks = curr + self.TURN90_TURN_TICKS
+                        self.turning_start_time = time.time()
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
                     else:
                         if getattr(self, "leds", None):
                             try: self.leds.status_following()
                             except Exception: pass
-                        self._forward_ticks(self.INTERSECT_FWD_TICKS)
+                        self._forward_ticks(self.INTERSECT_FWD_TICKS, timeout_s=3.0)
                         self._intersect_seen = 0
                         continue
 
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
 
-                curr_ticks = max(self.hardware.get_ticks())
-                if self.planned_direction and curr_ticks < self.turning_until_ticks:
-                    bias = 120 if self.planned_direction == "left" else (-120 if self.planned_direction == "right" else 0)
-                    error += bias
-                elif self.planned_direction and curr_ticks >= self.turning_until_ticks:
-                    self.planned_direction = None
+                if self.planned_direction is not None:
+                    curr_ticks = max(self.hardware.get_ticks())
+                    timed_out = (time.time() - self.turning_start_time) > self.TURN90_TIMEOUT_S
+                    ticks_reached = curr_ticks >= self.turning_until_ticks
+
+                    if timed_out or ticks_reached:
+                        if timed_out:
+                            log(f"Timeout na curva de 90 graus ({self.TURN90_TIMEOUT_S}s)")
+                        self.planned_direction = None
+                    else:
+                        bias = 120 if self.planned_direction == "left" else -120
+                        error += bias
 
                 self._drive(self.BASE_SPEED, error)
 
