@@ -593,7 +593,7 @@ class Robot:
                             except Exception: pass
                         self._forward_ticks(self.TURN90_FWD_TICKS)
                         self.planned_direction = confirmed_green
-                        curr = min(self.hardware.get_ticks())
+                        curr = max(self.hardware.get_ticks())
                         self.turning_until_ticks = curr + self.TURN90_TURN_TICKS
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
@@ -608,7 +608,7 @@ class Robot:
                 offset = c0[0] - (self.WIDTH // 2)
                 error = float(offset) + self.MIX_ANGLE * float(angle)
 
-                curr_ticks = min(self.hardware.get_ticks())
+                curr_ticks = max(self.hardware.get_ticks())
                 if self.planned_direction and curr_ticks < self.turning_until_ticks:
                     bias = 120 if self.planned_direction == "left" else (-120 if self.planned_direction == "right" else 0)
                     error += bias
