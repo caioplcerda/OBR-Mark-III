@@ -199,7 +199,7 @@ class Robot:
     MAX_GAP_FRAMES = 8
     LINE_LOSS_GRACE_FRAMES = 12
 
-    PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
+    PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
     def __init__(self):
         self.running = False
@@ -214,7 +214,8 @@ class Robot:
             try:
                 self.leds = LedController(pin=12, brightness=150)
                 if self.leds and self.leds.enabled:
-                    self.leds.status_ok_idle()
+                    # Set all LEDs to medium white on startup
+                    self.leds.set_all(180, 180, 180)
             except Exception as e:
                 self.leds = None
                 log(f"LEDs desabilitados: {e}")
@@ -249,9 +250,6 @@ class Robot:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         SHARED_STATE["status"] = "running"
-        if getattr(self, "leds", None):
-            try: self.leds.status_ok()
-            except Exception: pass
         log("Loop principal iniciado.")
 
     def stop(self):
@@ -259,11 +257,6 @@ class Robot:
         SHARED_STATE["status"] = "stopped"
         try: self.hardware.stop()
         except Exception: pass
-        if getattr(self, "leds", None):
-            try:
-                self.leds.status_lost()
-                self.leds.status_ok_idle()
-            except Exception: pass
         log("Parado.")
 
     def cleanup(self):
@@ -524,11 +517,6 @@ class Robot:
                 if is_curve90: self._c90_seen = min(self._c90_seen + 1, 10)
                 else:          self._c90_seen = 0
                 confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
-                if getattr(self, "leds", None):
-                    try:
-                        self.leds.status_ahead() if confirmed_ahead else self.leds.status_ok()
-                    except Exception:
-                        pass
 
                 c0 = cents[0]
                 if c0 is None:
@@ -553,23 +541,11 @@ class Robot:
                         self._gap_frames_left = 0
                         if self.CREEP_WHEN_LOST:
                             self._drive(self.CREEP_SPEED, 0.0)
-                            if getattr(self, "leds", None):
-                                try:
-                                    self.leds.status_lost()
-                                    self.leds.status_ok_idle()
-                                except Exception:
-                                    pass
                             self._publish(frame, "Perdido — procurando (creep)")
                             time.sleep(0.05)
                             continue
                         else:
                             self._line_loss_grace = 0
-                            if getattr(self, "leds", None):
-                                try:
-                                    self.leds.status_lost()
-                                    self.leds.status_ok_idle()
-                                except Exception:
-                                    pass
                             self._publish(frame, "Linha perdida — parando")
                             try: self.hardware.stop()
                             except Exception: pass
@@ -590,9 +566,6 @@ class Robot:
                 if is_intersection: self._intersect_seen = min(self._intersect_seen + 1, 10)
                 else:               self._intersect_seen = 0
                 confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
-                if confirmed_intersection and getattr(self, "leds", None):
-                    try: self.leds.status_intersection()
-                    except Exception: pass
 
                 green_centroids, green_dir = self.vision.detect_greens(frame)
                 if green_dir:
@@ -603,18 +576,12 @@ class Robot:
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
-                        if getattr(self, "leds", None):
-                            try: self.leds.status_turn("uturn")
-                            except Exception: pass
                         self._forward_ticks(self.INTERSECT_FWD_TICKS, timeout_s=3.0)
                         self._turn_in_place_ticks("left", self.TURN90_TURN_TICKS * 2, timeout_s=4.0)
                         self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         self.planned_direction = None
                         continue
                     elif confirmed_green in ("left", "right"):
-                        if getattr(self, "leds", None):
-                            try: self.leds.status_turn(confirmed_green)
-                            except Exception: pass
                         self._forward_ticks(self.TURN90_FWD_TICKS, timeout_s=2.5)
                         self.planned_direction = confirmed_green
                         curr = max(self.hardware.get_ticks())
@@ -623,9 +590,6 @@ class Robot:
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
                     else:
-                        if getattr(self, "leds", None):
-                            try: self.leds.status_following()
-                            except Exception: pass
                         self._forward_ticks(self.INTERSECT_FWD_TICKS, timeout_s=3.0)
                         self._intersect_seen = 0
                         continue
