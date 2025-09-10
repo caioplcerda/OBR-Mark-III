@@ -186,6 +186,7 @@ class Robot:
     INTERSECTION_WIDTH_FRAC = 0.55
     INTERSECT_DEBOUNCE = 4
     INTERSECT_AHEAD_DEBOUNCE = 3
+    C90_DEBOUNCE = 4
 
     GREEN_DEBOUNCE = 2
     TICKS_PER_REV = 36
@@ -221,6 +222,7 @@ class Robot:
         self.history = deque(maxlen=5)
         self._intersect_seen = 0
         self._intersect_ahead_seen = 0
+        self._c90_seen = 0
         self._green_seen = 0
         self._green_last = None
         self.planned_direction = None
@@ -243,11 +245,6 @@ class Robot:
         if self.running:
             log("Robô já está rodando.")
             return
-
-        if hasattr(self.hardware, "dir_pid"):
-            self.hardware.dir_pid.reset()
-            log("PID direcional resetado.")
-
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -357,6 +354,8 @@ class Robot:
             if (tl - start_l) >= ticks and (tr - start_r) >= ticks:
                 break
             time.sleep(0.005)
+            if not self.running:
+                break
         self.hardware.stop()
 
     def _turn_in_place_ticks(self, direction: str, ticks: int, timeout_s: float = 3.0):
@@ -374,6 +373,8 @@ class Robot:
             if max(tl - start_l, tr - start_r) >= ticks:
                 break
             time.sleep(0.005)
+            if not self.running:
+                break
         self.hardware.stop()
 
     # ---- visão (binarização, centróides, etc) ----
@@ -491,7 +492,7 @@ class Robot:
             cv2.circle(out, (int(look_point[0]), int(look_point[1])), 8, (0, 255, 255), 2, cv2.LINE_AA)
         txt = f"angle={fit_angle:+.1f} strips={len(valids)}"
         if is_intersection: txt += "  INT"
-        if is_curve90: txt += "  C90"
+        if confirmed_curve90: txt += "  C90"
         if is_ahead: txt += "  AHEAD"
         if green_dir: txt += f"  GREEN:{green_dir}"
         cv2.putText(out, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 3, cv2.LINE_AA)
@@ -519,6 +520,10 @@ class Robot:
                 if is_ahead: self._intersect_ahead_seen = min(self._intersect_ahead_seen + 1, 10)
                 else:        self._intersect_ahead_seen = 0
                 confirmed_ahead = self._intersect_ahead_seen >= self.INTERSECT_AHEAD_DEBOUNCE
+
+                if is_curve90: self._c90_seen = min(self._c90_seen + 1, 10)
+                else:          self._c90_seen = 0
+                confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
                 if getattr(self, "leds", None):
                     try:
                         self.leds.status_ahead() if confirmed_ahead else self.leds.status_ok()
@@ -596,7 +601,7 @@ class Robot:
                 else:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
-                if confirmed_intersection and not is_curve90:
+                if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         if getattr(self, "leds", None):
                             try: self.leds.status_turn("uturn")
