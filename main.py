@@ -199,7 +199,7 @@ class Robot:
     MAX_GAP_FRAMES = 8
     LINE_LOSS_GRACE_FRAMES = 12
 
-    PID_DEFAULTS = {"kp": 0.9, "ki": 0.0, "kd": 0.14, "sample_time": 0.02}
+    PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
     def __init__(self):
         self.running = False
