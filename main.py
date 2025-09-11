@@ -1,387 +1,432 @@
-# main.py corrigido
-# Segue-linha robusto + UI web + botão físico (21/4).
-# Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
-# Interseções e C90 agora exigem mais frames (debounce maior).
-# Loops respeitam botão STOP sempre.
+# hardware_control.py
+# Controle de motores TB6612FNG (canal B), com opção de encoders (TPR=36).
+# Usa backend lgpio (PWM por hardware) para não travar com WS2812.
+# Direita invertida (chassi espelhado), deadband alto para vencer inércia,
+# e "snap reto" quando erro é pequeno.
+# CORREÇÃO: Invertida a lógica de correção PID para resolver problema de direções
 
-import os
-import cv2
 import time
-import json
 import threading
-import numpy as np
-import math
-from datetime import datetime
-from collections import deque
 
-USE_LEDS = True
+# ------------------ Backends GPIO (forçando lgpio) ------------------
+class _PWMBase:
+    def start(self, duty): raise NotImplementedError
+    def ChangeDutyCycle(self, duty): raise NotImplementedError
+    def stop(self): raise NotImplementedError
 
-WEB_AVAILABLE = True
-SHARED_STATE = {
-    "config": {},
-    "last_frame": None,
-    "speeds": {"left": 0, "right": 0},
-    "view_mode": "preview",
-    "status": "idle",
-    "fps": 0.0,
-    "log": [],
-}
-try:
-    import web_stream
-    if hasattr(web_stream, "SHARED_STATE"):
-        SHARED_STATE = web_stream.SHARED_STATE
-    WEB_AVAILABLE = True
-except Exception:
-    WEB_AVAILABLE = False
+class _GPIOBackendBase:
+    OUT = 1
+    IN = 0
+    PUD_UP = 2
+    RISING = 31
+    def setup(self, pin, mode, pull_up_down=None): raise NotImplementedError
+    def output(self, pin, level): raise NotImplementedError
+    def input(self, pin): raise NotImplementedError
+    def PWM(self, pin, freq_hz): raise NotImplementedError
+    def add_event_detect(self, pin, edge, callback): raise NotImplementedError
+    def remove_event_detect(self, pin): pass
+    def cleanup(self): pass
 
-GPIO_AVAILABLE = True
-try:
-    import RPi.GPIO as GPIO
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
-    try:
-        GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.cleanup(21)
-    except Exception:
-        GPIO_AVAILABLE = False
-except Exception:
-    GPIO_AVAILABLE = False
-
-CANDIDATE_BUTTON_PINS = [21, 4]
-
-from hardware_control import HardwareControl
-from vision import Vision
-try:
-    from led_control import LedController
-except Exception:
-    LedController = None
-
-PICAMERA_AVAILABLE = True
-try:
-    from picamera2 import Picamera2
-    try:
-        from libcamera import Transform
-    except Exception:
-        Transform = None
-    PICAMERA_AVAILABLE = True
-except Exception:
-    PICAMERA_AVAILABLE = False
-
-def log(msg: str):
-    stamp = datetime.now().strftime("%H:%M:%S")
-    line = f"[{stamp}] {msg}"
-    print(line, flush=True)
-    try:
-        SHARED_STATE["log"].append(line)
-        if len(SHARED_STATE["log"]) > 300:
-            SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
-    except Exception:
-        pass
-
-class Camera:
-    def __init__(self, width=640, height=480, rotate_180=False):
-        self.width = width
-        self.height = height
-        self.rotate_180 = rotate_180
-        self.picam = None
-        self.cap = None
-        try:
-            import cv2 as _cv2
-            _cv2.setNumThreads(1)
-        except Exception:
-            pass
-
-        if PICAMERA_AVAILABLE:
+class _LGPIOBackend(_GPIOBackendBase):
+    def __init__(self, chip_index=0):
+        import lgpio
+        self._lgpio = lgpio
+        self._h = self._lgpio.gpiochip_open(chip_index)
+        self.OUT = 1; self.IN = 0; self.PUD_UP = 2
+        self.RISING = self._lgpio.RISING_EDGE
+        self._alerts = {}
+    def _claim_out(self, pin, init=0):
+        self._lgpio.gpio_claim_output(self._h, pin, init)
+    def _claim_in(self, pin, pud=None):
+        flags = 0
+        if pud == self.PUD_UP:
+            flags |= self._lgpio.SET_PULL_UP
+        self._lgpio.gpio_claim_input(self._h, pin, flags)
+    def setup(self, pin, mode, pull_up_down=None):
+        if mode == self.OUT: self._claim_out(pin, 0)
+        else: self._claim_in(pin, pull_up_down)
+    def output(self, pin, level):
+        self._lgpio.gpio_write(self._h, pin, 1 if level else 0)
+    def input(self, pin):
+        return self._lgpio.gpio_read(self._h, pin)
+    class _PWM(_PWMBase):
+        def __init__(self, lgpio_mod, handle, pin, freq):
+            self._lgpio = lgpio_mod; self._h = handle; self._pin = pin; self._freq = int(freq)
+            self._lgpio.gpio_claim_output(self._h, pin, 0)
+        def start(self, duty):
+            self.ChangeDutyCycle(duty)
+        def ChangeDutyCycle(self, duty):
+            self._lgpio.tx_pwm(self._h, self._pin, self._freq, max(0.0, min(100.0, float(duty))))
+        def stop(self):
+            try: self._lgpio.tx_pwm(self._h, self._pin, self._freq, 0)
+            except Exception: pass
+    def PWM(self, pin, freq_hz):
+        return self._PWM(self._lgpio, self._h, pin, freq_hz)
+    def add_event_detect(self, pin, edge, callback):
+        self._lgpio.gpio_claim_input(self._h, pin, self._lgpio.SET_PULL_UP)
+        self._lgpio.gpio_claim_alert(self._h, pin, self.RISING, 0)
+        def _cb(_chip, _gpio, level, _tick):
             try:
-                self.picam = Picamera2()
-                if Transform is not None:
-                    cfg = self.picam.create_video_configuration(
-                        main={"size": (self.width, self.height), "format": "RGB888"},
-                        transform=Transform(hflip=0, vflip=0),
-                        buffer_count=3
-                    )
-                else:
-                    cfg = self.picam.create_video_configuration(
-                        main={"size": (self.width, self.height), "format": "RGB888"},
-                        buffer_count=3
-                    )
-                self.picam.configure(cfg)
-                try:
-                    self.picam.set_controls({"FrameDurationLimits": (10000, 33333)})
-                except Exception:
-                    pass
-                self.picam.start()
-                log("Picamera2 iniciada em modo vídeo.")
-            except Exception as e:
-                log(f"Falha Picamera2: {e}. Usando OpenCV/USB.")
-                self.picam = None
-
-        if self.picam is None:
-            self.cap = cv2.VideoCapture(0)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            if not self.cap.isOpened():
-                raise RuntimeError("Nenhuma câmera disponível.")
-
-    def read(self):
-        if self.picam is not None:
-            rgb = self.picam.capture_array()
-            frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        else:
-            ok, frame_bgr = self.cap.read()
-            if not ok:
-                raise RuntimeError("Falha ao ler frame da câmera USB.")
-        if self.rotate_180:
-            frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
-        return frame_bgr
-
-    def release(self):
+                if level == 1:
+                    callback(pin)
+            except Exception:
+                pass
+        self._alerts[pin] = _cb
+        self._lgpio.set_alert_func(self._h, pin, _cb)
+    def remove_event_detect(self, pin):
+        if pin in self._alerts:
+            try: self._lgpio.set_alert_func(self._h, pin, None)
+            except Exception: pass
+            self._alerts.pop(pin, None)
+    def cleanup(self):
         try:
-            if self.picam is not None:
-                self.picam.stop()
-            if self.cap is not None:
-                self.cap.release()
+            for pin in list(self._alerts.keys()):
+                self.remove_event_detect(pin)
+        except Exception:
+            pass
+        try:
+            self._lgpio.gpiochip_close(self._h)
         except Exception:
             pass
 
-class Robot:
-    WIDTH = 640
-    HEIGHT = 480
+def _make_backend_forced_lgpio():
+    return _LGPIOBackend(), "lgpio"
 
-    BASE_SPEED = 10
-    MIX_ANGLE = 0.7
-    MAX_ANGLE = 50.0
+# ------------------ PID simples ------------------
+class PIDController:
+    def __init__(self, kp=0.4, ki=0.0, kd=0.1, setpoint=0.0, sample_time=0.01, out_min=None, out_max=None):
+        self.kp=float(kp); self.ki=float(ki); self.kd=float(kd)
+        self.setpoint=float(setpoint); self.sample_time=float(sample_time)
+        self._prev_error=0.0; self._integral=0.0; self._last_t=time.time()
+        self.out_min=out_min; self.out_max=out_max
+    def reset(self):
+        self._prev_error=0.0; self._integral=0.0; self._last_t=time.time()
+    def calculate(self, measurement):
+        now=time.time(); dt=now-self._last_t
+        if dt<self.sample_time: return self._prev_error
+        error=self.setpoint-float(measurement)
+        self._integral = max(-200.0, min(200.0, self._integral + error*dt))
+        derivative=(error-self._prev_error)/dt if dt>0 else 0.0
+        out=(self.kp*error)+(self.ki*self._integral)+(self.kd*derivative)
+        if self.out_min is not None: out=max(self.out_min,out)
+        if self.out_max is not None: out=min(self.out_max,out)
+        self._prev_error=error; self._last_t=now
+        return out
 
-    N_STRIPS = 5
-    STRIP_H = 28
-    STRIP_BOTTOM = 440
+# ------------------ HardwareControl ------------------
+class HardwareControl:
+    """Open-loop robusto por padrão; encoders opcionais."""
+    # Deadband & snap reto
+    MIN_DUTY = 55.0
+    STRAIGHT_ERR_TH = 12.0
+    STRAIGHT_MATCH_DELTA = 10.0
+    STRAIGHT_MIN_DUTY = 50.0
 
-    INTERSECT_DEBOUNCE = 6   # aumentado
-    INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
-    GREEN_DEBOUNCE = 2
+    # Encoders
+    TICKS_PER_REV = 36
+    MAX_TICKS_PER_SEC = 300.0
+    CONTROL_HZ = 50
+    VEL_PID_L = dict(kp=0.25, ki=0.35, kd=0.0, sample_time=1.0/CONTROL_HZ)
+    VEL_PID_R = dict(kp=0.25, ki=0.35, kd=0.0, sample_time=1.0/CONTROL_HZ)
 
-    # tempos em segundos ao invés de ticks
-    INTERSECT_FWD_TIME = 0.8
-    TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
+    # Servos
+    SERVO_PINS = [26, 18, 16, 20]
+    SERVO_FREQ_HZ = 50
+    SERVO_AB_US = [
+        {"A": 1800, "B": 1800, "C": 1800, "D": 1800},
+        {"A": 1444, "B": 2000, "C": 2388},
+        {"A": 2166, "B": 1722},
+        {"A": 1000, "B": 2000}
+    ]
 
-    PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
+    # TB6612B pinos
+    L_BIN1, L_BIN2, L_PWMB = 17, 27, 22
+    R_BIN1, R_BIN2, R_PWMB = 23, 24, 25
+    STBY = 5
 
-    def __init__(self):
-        self.running = False
-        self.thread = None
+    # Encoders (canal A)
+    ENCODER_A_L, ENCODER_B_L = 6, 13
+    ENCODER_A_R, ENCODER_B_R = 19, 26
 
-        self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=False)
-        self.vision = Vision({}, log)
-        self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
+    # Inversões (direita invertida)
+    INVERT_LEFT  = False
+    INVERT_RIGHT = True
 
-        self.history = deque(maxlen=5)
-        self._intersect_seen = 0
-        self._c90_seen = 0
-        self._green_seen = 0
-        self._green_last = None
-        self.planned_direction = None
+    # Modos
+    OPEN_LOOP = False           # Alterado para False para usar controle fechado com encoders
+    AUTO_FALLBACK_OPEN = True
+    FALLBACK_CHECK_SEC = 0.7
 
-    def start(self):
-        if self.running:
-            log("Robô já está rodando.")
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._loop, daemon=True)
-        self.thread.start()
-        SHARED_STATE["status"] = "running"
-        log("Loop principal iniciado.")
+    def __init__(self, config):
+        self.config = config or {}
+        self.GPIO, self.backend = _make_backend_forced_lgpio()
+
+        # Estado
+        self._ticks_l = 0; self._ticks_r = 0
+        self.meas_tps_l = 0.0; self.meas_tps_r = 0.0
+        self.target_tps_l = 0.0; self.target_tps_r = 0.0
+        self.last_left_speed = 0; self.last_right_speed = 0
+        self._encoders_ok = True
+
+        self._pwm_left = None; self._pwm_right = None
+        self._servo_pwm = [None]*4; self._servo_ready=[False]*4
+        self._servo_pos = ['A'] * 4
+
+        self._safe_setup_io()
+
+        self.dir_pid = PIDController(
+            kp=self.config.get("pid", {}).get("kp", 0.9),
+            ki=self.config.get("pid", {}).get("ki", 0.0),  # Alterado de volta para 0.0 para reduzir agressividade nas curvas
+            kd=self.config.get("pid", {}).get("kd", 0.14),
+            sample_time=self.config.get("pid", {}).get("sample_time", 0.02)
+        )
+        self.pid_vel_l = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_L)
+        self.pid_vel_r = PIDController(out_min=-100.0, out_max=100.0, **self.VEL_PID_R)
+
+        self._init_servos()
+
+        self._last_meas_t = time.time()
+        self._last_ticks_l = 0; self._last_ticks_r = 0
+        self._enc_dead_timer = None
+        self._ctrl_running = False
+        self._ctrl_th = None
+
+    def _safe_setup_io(self):
+        try:
+            self.GPIO.setup(self.STBY, self.GPIO.OUT)
+            self.GPIO.output(self.STBY, 1)
+
+            for p in [self.L_BIN1, self.L_BIN2, self.R_BIN1, self.R_BIN2]:
+                self.GPIO.setup(p, self.GPIO.OUT)
+                self.GPIO.output(p, 0)
+
+            self._pwm_left = self.GPIO.PWM(self.L_PWMB, 1000)
+            self._pwm_right = self.GPIO.PWM(self.R_PWMB, 1000)
+            self._pwm_left.start(0)
+            self._pwm_right.start(0)
+
+            # Encoders
+            try:
+                def _tick_l(_pin): self._ticks_l += 1
+                def _tick_r(_pin): self._ticks_r += 1
+                self.GPIO.setup(self.ENCODER_A_L, self.GPIO.IN, self.GPIO.PUD_UP)
+                self.GPIO.setup(self.ENCODER_A_R, self.GPIO.IN, self.GPIO.PUD_UP)
+                self.GPIO.add_event_detect(self.ENCODER_A_L, self.GPIO.RISING, _tick_l)
+                self.GPIO.add_event_detect(self.ENCODER_A_R, self.GPIO.RISING, _tick_r)
+                self._encoders_ok = True
+                self._ctrl_running = True
+                self._ctrl_th = threading.Thread(target=self._control_loop, daemon=True)
+                self._ctrl_th.start()
+            except Exception as e:
+                self._encoders_ok = False
+        except Exception as e:
+            pass
+
+    def _apply_deadband(self, cmd):
+        if cmd == 0.0:
+            return 0.0
+        a = abs(cmd)
+        if a < self.MIN_DUTY:
+            return self.MIN_DUTY * (1.0 if cmd > 0 else -1.0)
+        return cmd
+
+    def set_open_loop(self, enabled: bool):
+        self.OPEN_LOOP = bool(enabled)
+
+    # ---------- Motores ----------
+    def set_motor_speed(self, base_speed, error):
+        # PID direcional
+        correction = self.dir_pid.calculate(error)
+        
+        # CORREÇÃO: Invertida a lógica de correção PID
+        # Se erro é positivo (linha à direita), aumentamos motor esquerdo e diminuímos direito
+        # para virar à direita
+        left = float(base_speed) + float(correction)    # ALTERADO: era -
+        right = float(base_speed) - float(correction)   # ALTERADO: era +
+
+        # Limites
+        left = max(-100.0, min(100.0, left))
+        right = max(-100.0, min(100.0, right))
+
+        # Snap reto (erro pequeno)
+        # if abs(error) < self.STRAIGHT_ERR_TH and abs(left - right) < self.STRAIGHT_MATCH_DELTA:
+        #     left = self.STRAIGHT_MIN_DUTY
+        #     right = self.STRAIGHT_MIN_DUTY
+
+        # Deadband
+        left = self._apply_deadband(left) if left != 0 else 0.0
+        right = self._apply_deadband(right) if right != 0 else 0.0
+
+        # Telemetria
+        self.last_left_speed = int(left)
+        self.last_right_speed = int(right)
+
+        # Log para debug (verifique no console do Pi)
+        print(f"[DEBUG] Set speeds: left={left:.1f}, right={right:.1f}, error={error:.1f}, correction={correction:.1f}")
+
+        # Open-loop por padrão
+        if self.OPEN_LOOP or not self._encoders_ok:
+            self._write_motor_pwm(left, right)
+        else:
+            self.target_tps_l = (left / 100.0) * self.MAX_TICKS_PER_SEC
+            self.target_tps_r = (right / 100.0) * self.MAX_TICKS_PER_SEC
+            # watchdog: se não mede nada, cai para open-loop
+            if self.AUTO_FALLBACK_OPEN and (abs(self.target_tps_l) > 50 or abs(self.target_tps_r) > 50):
+                if (self.meas_tps_l < 5 and self.meas_tps_r < 5):
+                    if self._enc_dead_timer is None:
+                        self._enc_dead_timer = time.time()
+                    elif time.time() - self._enc_dead_timer >= self.FALLBACK_CHECK_SEC:
+                        self.OPEN_LOOP = True
+                else:
+                    self._enc_dead_timer = None
 
     def stop(self):
-        self.running = False
-        SHARED_STATE["status"] = "stopped"
-        try: self.hardware.stop()
+        self.target_tps_l = 0.0
+        self.target_tps_r = 0.0
+        self._write_motor_pwm(0.0, 0.0)
+
+    def get_ticks(self):
+        """Retorna uma tupla com os ticks acumulados (esquerda, direita)."""
+        return int(self._ticks_l), int(self._ticks_r)
+
+    def reset_ticks(self):
+        """Zera contadores de ticks."""
+        self._ticks_l = 0
+        self._ticks_r = 0
+
+    def _control_loop(self):
+        period = 1.0 / float(self.CONTROL_HZ)
+        pwm_l = 0.0; pwm_r = 0.0
+        alpha = 0.4
+        while self._ctrl_running:
+            t0 = time.time()
+            if not self.OPEN_LOOP and self._encoders_ok:
+                now = time.time()
+                dt = now - self._last_meas_t
+                if dt <= 0: dt = period
+
+                ticks_l = self._ticks_l; ticks_r = self._ticks_r
+                dt_l = ticks_l - getattr(self, "_last_ticks_l", 0)
+                dt_r = ticks_r - getattr(self, "_last_ticks_r", 0)
+
+                inst_l = float(dt_l) / dt
+                inst_r = float(dt_r) / dt
+
+                self.meas_tps_l = alpha * inst_l + (1 - alpha) * self.meas_tps_l
+                self.meas_tps_r = alpha * inst_r + (1 - alpha) * self.meas_tps_r
+
+                self._last_ticks_l = ticks_l; self._last_ticks_r = ticks_r
+                self._last_meas_t = now
+
+                self.pid_vel_l.setpoint = self.target_tps_l
+                self.pid_vel_r.setpoint = self.target_tps_r
+
+                adj_l = self.pid_vel_l.calculate(self.meas_tps_l)
+                adj_r = self.pid_vel_r.calculate(self.meas_tps_r)
+
+                pwm_l = max(-100.0, min(100.0, pwm_l + adj_l * 0.2))
+                pwm_r = max(-100.0, min(100.0, pwm_r + adj_r * 0.2))
+
+                pwm_l = self._apply_deadband(pwm_l) if pwm_l != 0 else 0.0
+                pwm_r = self._apply_deadband(pwm_r) if pwm_r != 0 else 0.0
+
+                self._write_motor_pwm(pwm_l, pwm_r)
+
+                # Log para debug encoders
+                print(f"[DEBUG] Encoders: target L/R={self.target_tps_l:.1f}/{self.target_tps_r:.1f}, meas L/R={self.meas_tps_l:.1f}/{self.meas_tps_r:.1f}, PWM L/R={pwm_l:.1f}/{pwm_r:.1f}")
+
+            elapsed = time.time() - t0
+            if elapsed < period:
+                time.sleep(period - elapsed)
+
+    def _write_motor_pwm(self, left_cmd, right_cmd):
+        # Inversões (direita invertida)
+        if self.INVERT_LEFT:  left_cmd  = -left_cmd
+        if self.INVERT_RIGHT: right_cmd = -right_cmd
+
+        # Esquerda
+        if left_cmd >= 0:
+            self.GPIO.output(self.L_BIN1, 1)
+            self.GPIO.output(self.L_BIN2, 0)
+        else:
+            self.GPIO.output(self.L_BIN1, 0)
+            self.GPIO.output(self.L_BIN2, 1)
+        self._pwm_left.ChangeDutyCycle(abs(left_cmd))
+
+        # Direita
+        if right_cmd >= 0:
+            self.GPIO.output(self.R_BIN1, 1)
+            self.GPIO.output(self.R_BIN2, 0)
+        else:
+            self.GPIO.output(self.R_BIN1, 0)
+            self.GPIO.output(self.R_BIN2, 1)
+        self._pwm_right.ChangeDutyCycle(abs(right_cmd))
+
+        # Log para debug write
+        print(f"[DEBUG] Write PWM: left_cmd={left_cmd:.1f}, right_cmd={right_cmd:.1f}")
+
+    # ---------- Servos ----------
+    @staticmethod
+    def _us_to_duty(us, period_ms=20.0):
+        return max(0.0, min(100.0, (us / 1000.0) / period_ms * 100.0))
+    def _servo_write_us(self, index, us):
+        i = index - 1
+        if not (0 <= i < 4) or not self._servo_ready[i]:
+            return False
+        self._servo_pwm[i].ChangeDutyCycle(self._us_to_duty(int(us)))
+        return True
+    def set_servo(self, index, pos, smooth_ms=0):
+        i = index - 1
+        if not (0 <= i < 4) or pos not in self.SERVO_AB_US[i]:
+            return False
+        target = int(self.SERVO_AB_US[i][pos])
+        if smooth_ms > 0:
+            start_pos_name = self._servo_pos[i]
+            start = int(self.SERVO_AB_US[i][start_pos_name])
+            steps = max(3, int(smooth_ms / 20))
+            for t in range(steps + 1):
+                u = int(start + (target - start) * (t / steps))
+                self._servo_write_us(index, u)
+                time.sleep(0.02)
+        else:
+            self._servo_write_us(index, target)
+        self._servo_pos[i] = pos
+        return True
+    def set_servos(self, positions=('A','A','A','A'), smooth_ms=0):
+        for idx, p in enumerate(positions, start=1):
+            self.set_servo(idx, p, smooth_ms=smooth_ms)
+    def set_servo_us(self, index, us):
+        return self._servo_write_us(index, int(us))
+    def _init_servos(self):
+        for i, pin in enumerate(self.SERVO_PINS):
+            try:
+                self.GPIO.setup(pin, self.GPIO.OUT)
+                pwm = self.GPIO.PWM(pin, self.SERVO_FREQ_HZ)
+                pwm.start(0)
+                self._servo_pwm[i] = pwm
+                self._servo_ready[i] = True
+                try: self.set_servo(i + 1, 'A', smooth_ms=150)
+                except Exception: pass
+            except Exception:
+                self._servo_ready[i] = False
+        time.sleep(0.05)
+
+    # ---------- Cleanup ----------
+    def cleanup(self):
+        self._ctrl_running = False
+        try:
+            if hasattr(self,"_ctrl_th") and self._ctrl_th and self._ctrl_th.is_alive():
+                self._ctrl_th.join(timeout=0.5)
         except Exception: pass
-        log("Parado.")
-
-    def _drive(self, base_speed: float, error: float):
+        try: self.stop()
+        except Exception: pass
         try:
-            self.hardware.set_motor_speed(base_speed, error)
-        except Exception:
-            pass
-
-    def _forward_time(self, duration_s: float):
-        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
-        start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
-            time.sleep(0.01)
-        self.hardware.stop()
-
-    def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = 120 if direction == "left" else -120
-        start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
-            self.hardware.set_motor_speed(0, bias)
-            time.sleep(0.01)
-        self.hardware.stop()
-
-    def _loop(self):
+            for pwm in self._servo_pwm:
+                if pwm: pwm.stop()
+        except Exception: pass
         try:
-            while self.running:
-                frame = self.camera.read()
-                bw = self._binarize(frame)
-
-                cents, widths = [], []
-                for i in range(self.N_STRIPS):
-                    y0 = self.STRIP_BOTTOM - i*self.STRIP_H
-                    c, w = self._strip_centroid(bw, y0, self.STRIP_H)
-                    cents.append(c)
-                    widths.append(w)
-
-                valids = [p for p in cents if p is not None]
-                angle = self._fit_angle(valids)
-
-                is_intersection, is_curve90, _ = self._detect_intersection(bw, widths, cents, angle)
-
-                if is_curve90:
-                    self._c90_seen += 1
-                else:
-                    self._c90_seen = 0
-                confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
-
-                if is_intersection:
-                    self._intersect_seen += 1
-                else:
-                    self._intersect_seen = 0
-                confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
-
-                green_centroids, green_dir = self.vision.detect_greens(frame)
-                if green_dir:
-                    self._green_last = green_dir
-                    self._green_seen += 1
-                else:
-                    self._green_seen = 0
-                confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
-
-                if confirmed_intersection and not confirmed_curve90:
-                    if confirmed_green == "uturn":
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
-                        self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
-                        continue
-                    elif confirmed_green in ("left", "right"):
-                        self._forward_time(self.TURN90_FWD_TIME)
-                        self._turn_in_place_time(confirmed_green, self.TURN90_TURN_TIME)
-                        self._green_seen = 0; self._intersect_seen = 0
-                        continue
-                    else:
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._intersect_seen = 0
-                        continue
-
-                if valids:
-                    offset = valids[0][0] - (self.WIDTH // 2)
-                    error = float(offset) + self.MIX_ANGLE * float(angle)
-                    self._drive(self.BASE_SPEED, error)
-                else:
-                    self.hardware.stop()
-
-                SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["speeds"] = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
-                time.sleep(0.01)
-        except Exception as e:
-            log(f"Erro no loop principal: {e}")
-        finally:
-            try: self.hardware.stop()
-            except Exception: pass
-
-    # ==== visão utilitários (mesmos do original) ====
-    def _binarize(self, frame_bgr):
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
-        return bw
-
-    def _strip_centroid(self, bw, y0, h):
-        H, W = bw.shape[:2]
-        y0 = max(0, min(H - 1, int(y0)))
-        y1 = max(0, min(H, int(y0 + h)))
-        roi = bw[y0:y1, :]
-        colsum = roi.sum(axis=0)
-        if colsum.max() < 255 * h * 0.05:
-            return None, 0
-        x = np.arange(0, W, dtype=np.float32)
-        cx = float((x * colsum).sum() / (colsum.sum() + 1e-6))
-        cy = int((y0 + y1) / 2)
-        return (int(cx), int(cy)), int(np.count_nonzero(colsum))
-
-    def _fit_angle(self, pts):
-        if len(pts) < 2:
-            return 0.0
-        xs = np.array([p[0] for p in pts], dtype=np.float32)
-        ys = np.array([p[1] for p in pts], dtype=np.float32)
-        A = np.vstack([ys, np.ones_like(ys)]).T
-        alpha, _ = np.linalg.lstsq(A, xs, rcond=None)[0]
-        angle_deg = np.degrees(np.arctan2(alpha, 1.0))
-        return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
-
-    def _detect_intersection(self, bw, widths, cents, angle_deg):
-        # simplificado: só checa largura média
-        wide = sum(widths[:2]) > 300
-        ang_high = abs(angle_deg) > 28
-        return wide, ang_high, False
-
-def _wire_web(robot: Robot):
-    if not WEB_AVAILABLE:
-        return
-    try:
-        if hasattr(web_stream, "register_robot"):
-            web_stream.register_robot(robot)
-            log("Robô registrado no servidor web.")
-    except Exception as e:
-        log(f"Falha ao integrar com web_stream: {e}")
-
-def _setup_button(robot: Robot):
-    if not GPIO_AVAILABLE:
-        log("GPIO indisponível: sem botão físico.")
-        return
-    for pin in [21, 4]:
-        try:
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            def _toggle(channel):
-                if GPIO.input(pin) == GPIO.LOW:
-                    if robot.running:
-                        robot.stop()
-                    else:
-                        robot.start()
-            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
-            log(f"Botão físico pronto no BCM {pin}.")
-            break
-        except Exception as e:
-            log(f"Falha botão BCM {pin}: {e}")
-
-def main():
-    robot = Robot()
-    _wire_web(robot)
-    _setup_button(robot)
-
-    if WEB_AVAILABLE and hasattr(web_stream, "app"):
-        host = os.environ.get("HOST", "0.0.0.0")
-        port = int(os.environ.get("PORT", "5000"))
-        try:
-            if hasattr(web_stream, "socketio"):
-                web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
-            else:
-                web_stream.app.run(host=host, port=port)
-        finally:
-            robot.stop()
-    else:
-        try:
-            while True:
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            robot.stop()
-
-if __name__ == "__main__":
-    main()
-
+            if self._pwm_left: self._pwm_left.stop()
+            if self._pwm_right: self._pwm_right.stop()
+        except Exception: pass
+        try: self.GPIO.cleanup()
+        except Exception: pass
