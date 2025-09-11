@@ -3,6 +3,7 @@
 # Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
 # Interseções e C90 agora exigem mais frames (debounce maior).
 # Loops respeitam botão STOP sempre.
+# Correção: Adicionado manejo explícito de curvas C90 com direção baseada no ângulo.
 
 import os
 import cv2
@@ -159,7 +160,7 @@ class Robot:
 
     INTERSECT_DEBOUNCE = 6   # aumentado
     INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
+    C90_DEBOUNCE = 6         # aumentado
     GREEN_DEBOUNCE = 2
 
     # tempos em segundos ao invés de ticks
@@ -264,7 +265,16 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                if confirmed_intersection and not confirmed_curve90:
+                if confirmed_curve90 and not confirmed_intersection:
+                    # Handle C90 turn: determine direction based on angle sign
+                    turn_direction = "left" if angle > 0 else "right"
+                    log(f"C90 detectada, virando para {turn_direction} (ângulo: {angle:.1f}°)")
+                    self._forward_time(self.TURN90_FWD_TIME)
+                    self._turn_in_place_time(turn_direction, self.TURN90_TURN_TIME)
+                    self._c90_seen = 0
+                    continue
+
+                if confirmed_intersection:
                     if confirmed_green == "uturn":
                         self._forward_time(self.INTERSECT_FWD_TIME)
                         self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
