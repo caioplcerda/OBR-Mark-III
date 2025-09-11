@@ -159,7 +159,7 @@ class Robot:
 
     # tempos base (servirão como timeouts máximos no novo método)
     INTERSECT_FWD_TIME = 0.8
-    TURN90_FWD_TIME = 0.4
+    TURN90_FWD_TIME = 0.6
     TURN90_TURN_TIME = 1.2  # tempo máximo aceitável para 90 (usado como timeout)
 
     # bias de giro (reduzido para evitar giros bruscos)
@@ -673,3 +673,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
