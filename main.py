@@ -144,7 +144,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 21  # 30 * 0.7 = 21 (30% slower)
+    BASE_SPEED = 26  # 21 / 0.8 = 26.25 ≈ 26
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
@@ -158,12 +158,12 @@ class Robot:
     GREEN_DEBOUNCE = 3        # increased slightly
 
     # tempos base (servirão como timeouts máximos no novo método)
-    INTERSECT_FWD_TIME = 0.56  # 0.8 * 0.7 = 0.56 (30% slower)
-    TURN90_FWD_TIME = 0.42     # 0.6 * 0.7 = 0.42 (30% slower)
-    TURN90_TURN_TIME = 0.84    # 1.2 * 0.7 = 0.84 (30% slower)
+    INTERSECT_FWD_TIME = 0.7   # 0.56 / 0.8 = 0.7
+    TURN90_FWD_TIME = 0.525    # 0.42 / 0.8 = 0.525
+    TURN90_TURN_TIME = 1.05    # 0.84 / 0.8 = 1.05
 
     # bias de giro (reduzido para evitar giros bruscos)
-    TURN_BIAS = 70   # 100 * 0.7 = 70 (30% slower)
+    TURN_BIAS = 88   # 70 / 0.8 = 87.5 ≈ 88
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
