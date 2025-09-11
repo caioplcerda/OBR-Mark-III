@@ -152,10 +152,10 @@ class Robot:
     STRIP_H = 28
     STRIP_BOTTOM = 440
 
-    INTERSECT_DEBOUNCE = 6   # aumentado
+    INTERSECT_DEBOUNCE = 8   # increased for more stability
     INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
-    GREEN_DEBOUNCE = 2
+    C90_DEBOUNCE = 10         # increased significantly to reduce false curve detection
+    GREEN_DEBOUNCE = 3        # increased slightly
 
     # tempos base (servirão como timeouts máximos no novo método)
     INTERSECT_FWD_TIME = 0.8
@@ -429,8 +429,8 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # Prioridade: curvas 90 confirmadas
-                if confirmed_curve90:
+                # Prioridade: curvas 90 confirmadas (mas só se não for interseção)
+                if confirmed_curve90 and not confirmed_intersection:
                     dir_to_turn = curve_dir or confirmed_green or self._infer_curve_direction(valids, angle)
                     log(f"Curva 90° confirmada -> direção: {dir_to_turn}")
                     # anda um pouco e gira até encontrar linha (timeout = TURN90_TURN_TIME)
@@ -447,8 +447,8 @@ class Robot:
                     self._green_last = None
                     continue
 
-                # Interseções
-                if confirmed_intersection and not confirmed_curve90:
+                # Interseções (prioridade sobre curvas 90)
+                if confirmed_intersection:
                     if confirmed_green == "uturn":
                         # Additional safety: only do U-turn if we've seen the signal for multiple frames
                         if self._green_seen >= 4:  # Require more confirmation for U-turns
@@ -550,9 +550,9 @@ class Robot:
         total_width = sum(widths)
         disappearance = total_width < 50 and len([w for w in widths if w > 0]) < 2
         
-        # Only detect curve90 if there's clear evidence of a curve, not just high angle
-        # At intersections, high angle alone shouldn't trigger curve90
-        is_curve90 = (curve_dir is not None and disappearance) or (disappearance and abs(angle_deg) > 20)
+        # Only detect curve90 if there's very clear evidence of a curve
+        # At intersections, we need strong evidence to avoid false curve detection
+        is_curve90 = (curve_dir is not None and disappearance and abs(angle_deg) > 15) or (disappearance and abs(angle_deg) > 30)
         
         if ang_high and curve_dir is None:
             curve_dir = "left" if angle_deg < 0 else "right"
@@ -673,4 +673,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
