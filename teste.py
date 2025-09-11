@@ -1,17 +1,12 @@
-# main.py corrigido
-# Segue-linha robusto + UI web + botão físico (21/4).
-# Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
-# Interseções e C90 agora exigem mais frames (debounce maior).
-# Loops respeitam botão STOP sempre.
+# main_fixed.py
+# Segue-linha robusto + UI web + botão físico (corrigido)
+# Ajustado para seguir mais reto com controle proporcional (P-controller simples)
 
 import os
 import cv2
 import time
-import json
 import threading
 import numpy as np
-import math
-import traceback
 from datetime import datetime
 from collections import deque
 
@@ -40,6 +35,11 @@ try:
     import RPi.GPIO as GPIO
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
+    try:
+        GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.cleanup(21)
+    except Exception:
+        GPIO_AVAILABLE = False
 except Exception:
     GPIO_AVAILABLE = False
 
@@ -63,6 +63,7 @@ try:
 except Exception:
     PICAMERA_AVAILABLE = False
 
+
 def log(msg: str):
     stamp = datetime.now().strftime("%H:%M:%S")
     line = f"[{stamp}] {msg}"
@@ -73,6 +74,7 @@ def log(msg: str):
             SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
     except Exception:
         pass
+
 
 class Camera:
     def __init__(self, width=640, height=480, rotate_180=False):
@@ -141,29 +143,15 @@ class Camera:
         except Exception:
             pass
 
+
 class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 10
-    MIX_ANGLE = 0.7
-    MAX_ANGLE = 50.0
-
-    N_STRIPS = 5
-    STRIP_H = 28
-    STRIP_BOTTOM = 440
-
-    INTERSECT_DEBOUNCE = 6   # aumentado
-    INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
-    GREEN_DEBOUNCE = 2
-
-    # tempos em segundos ao invés de ticks
-    INTERSECT_FWD_TIME = 0.8
-    TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
-
-    PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
+    MAX_SPEED = 100
+    BASE_SPEED = 60     # menor que o máximo → dá margem de correção
+    K_GAIN = 0.02       # ajuste do controlador proporcional
+    DEAD_ZONE = 10      # zona morta para evitar ziguezague
 
     def __init__(self):
         self.running = False
@@ -171,14 +159,9 @@ class Robot:
 
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=False)
         self.vision = Vision({}, log)
-        self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
+        self.hardware = HardwareControl({"pid": {}})
 
         self.history = deque(maxlen=5)
-        self._intersect_seen = 0
-        self._c90_seen = 0
-        self._green_seen = 0
-        self._green_last = None
-        self.planned_direction = None
 
     def start(self):
         if self.running:
@@ -197,39 +180,7 @@ class Robot:
             self.hardware.stop()
         except Exception:
             pass
-        try:
-            if hasattr(self, "camera") and self.camera:
-                self.camera.release()
-        except Exception:
-            pass
-        if self.thread is not None:
-            self.thread.join(timeout=1.0)
         log("Parado.")
-
-    def _drive(self, base_speed: float, error: float):
-        try:
-            self.hardware.set_motor_speed(base_speed, error)
-        except Exception:
-            pass
-
-    def _forward_time(self, duration_s: float):
-        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
-        start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
-            time.sleep(0.01)
-        self.hardware.stop()
-
-    def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = -120 if direction == "left" else 120
-        start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
-            self.hardware.set_motor_speed(0, bias)
-            time.sleep(0.01)
-        self.hardware.stop()
 
     def _loop(self):
         try:
@@ -237,81 +188,51 @@ class Robot:
                 frame = self.camera.read()
                 bw = self._binarize(frame)
 
-                cents, widths = [], []
-                for i in range(self.N_STRIPS):
-                    y0 = self.STRIP_BOTTOM - i*self.STRIP_H
-                    c, w = self._strip_centroid(bw, y0, self.STRIP_H)
-                    cents.append(c)
-                    widths.append(w)
+                centroid, _ = self._strip_centroid(bw, self.HEIGHT - 50, 40)
 
-                valids = [p for p in cents if p is not None]
-                angle = self._fit_angle(valids)
+                if centroid is not None:
+                    error = centroid[0] - (self.WIDTH // 2)
 
-                is_intersection, is_curve90, _ = self._detect_intersection(bw, widths, cents, angle)
+                    # controle proporcional
+                    correction = int(self.K_GAIN * error)
 
-                if is_curve90:
-                    self._c90_seen += 1
-                else:
-                    self._c90_seen = 0
-                confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
+                    left = self.BASE_SPEED - correction
+                    right = self.BASE_SPEED + correction
 
-                if is_intersection:
-                    self._intersect_seen += 1
-                else:
-                    self._intersect_seen = 0
-                confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
+                    # aplica zona morta
+                    if abs(error) < self.DEAD_ZONE:
+                        left = right = self.BASE_SPEED
 
-                green_centroids, green_dir = self.vision.detect_greens(frame)
-                if green_dir:
-                    self._green_last = green_dir
-                    self._green_seen += 1
-                else:
-                    self._green_seen = 0
-                confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
+                    # limita velocidades
+                    left = int(np.clip(left, -self.MAX_SPEED, self.MAX_SPEED))
+                    right = int(np.clip(right, -self.MAX_SPEED, self.MAX_SPEED))
 
-                if confirmed_intersection and not confirmed_curve90:
-                    if confirmed_green == "uturn":
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
-                        self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
-                        continue
-                    elif confirmed_green in ("left", "right"):
-                        self._forward_time(self.TURN90_FWD_TIME)
-                        self._turn_in_place_time(confirmed_green, self.TURN90_TURN_TIME)
-                        self._green_seen = 0; self._intersect_seen = 0
-                        continue
-                    else:
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._intersect_seen = 0
-                        continue
-
-                if valids:
-                    offset = valids[0][0] - (self.WIDTH // 2)
-                    error = float(offset) + self.MIX_ANGLE * float(angle)
-                    self._drive(self.BASE_SPEED, error)
+                    self.hardware.drive(left, right)
                 else:
                     self.hardware.stop()
 
-                # compressão do frame para economizar memória na UI
-                ok, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                SHARED_STATE["last_frame"] = jpg.tobytes() if ok else None
+                SHARED_STATE["last_frame"] = frame
                 SHARED_STATE["speeds"] = {
-                    "left": getattr(self.hardware, "last_left_speed", 0),
-                    "right": getattr(self.hardware, "last_right_speed", 0)
+                    "left": self.hardware.last_left_speed,
+                    "right": self.hardware.last_right_speed
                 }
                 time.sleep(0.01)
         except Exception as e:
-            log(f"Erro no loop principal: {e}\n{traceback.format_exc()}")
+            log(f"Erro no loop principal: {e}")
         finally:
             try:
                 self.hardware.stop()
             except Exception:
                 pass
 
-    # ==== visão utilitários (mesmos do original) ====
+    # ==== visão utilitários ====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
+        bw = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV, 21, 7
+        )
         return bw
 
     def _strip_centroid(self, bw, y0, h):
@@ -327,21 +248,6 @@ class Robot:
         cy = int((y0 + y1) / 2)
         return (int(cx), int(cy)), int(np.count_nonzero(colsum))
 
-    def _fit_angle(self, pts):
-        if len(pts) < 2:
-            return 0.0
-        xs = np.array([p[0] for p in pts], dtype=np.float32)
-        ys = np.array([p[1] for p in pts], dtype=np.float32)
-        A = np.vstack([ys, np.ones_like(ys)]).T
-        alpha, _ = np.linalg.lstsq(A, xs, rcond=None)[0]
-        angle_deg = np.degrees(np.arctan2(alpha, 1.0))
-        return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
-
-    def _detect_intersection(self, bw, widths, cents, angle_deg):
-        # simplificado: só checa largura média
-        wide = sum(widths[:2]) > 300
-        ang_high = abs(angle_deg) > 28
-        return wide, ang_high, False
 
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
@@ -353,6 +259,7 @@ def _wire_web(robot: Robot):
     except Exception as e:
         log(f"Falha ao integrar com web_stream: {e}")
 
+
 def _setup_button(robot: Robot):
     if not GPIO_AVAILABLE:
         log("GPIO indisponível: sem botão físico.")
@@ -360,19 +267,19 @@ def _setup_button(robot: Robot):
     for pin in [21, 4]:
         try:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            def _make_toggle(p):
-                def _toggle(channel):
-                    if GPIO.input(p) == GPIO.LOW:
-                        if robot.running:
-                            robot.stop()
-                        else:
-                            robot.start()
-                return _toggle
-            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_make_toggle(pin), bouncetime=300)
+
+            def _toggle(channel):
+                if GPIO.input(pin) == GPIO.LOW:
+                    if robot.running:
+                        robot.stop()
+                    else:
+                        robot.start()
+            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
             log(f"Botão físico pronto no BCM {pin}.")
             break
         except Exception as e:
             log(f"Falha botão BCM {pin}: {e}")
+
 
 def main():
     robot = Robot()
@@ -389,22 +296,13 @@ def main():
                 web_stream.app.run(host=host, port=port)
         finally:
             robot.stop()
-            if GPIO_AVAILABLE:
-                try:
-                    GPIO.cleanup()
-                except Exception:
-                    pass
     else:
         try:
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
             robot.stop()
-            if GPIO_AVAILABLE:
-                try:
-                    GPIO.cleanup()
-                except Exception:
-                    pass
+
 
 if __name__ == "__main__":
     main()
