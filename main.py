@@ -1,6 +1,4 @@
-# main.py corrigido (giro incremental substituído para evitar overshoot 180°)
-# Substitui _turn_until_line por uma versão incremental em bursts.
-
+#!/usr/bin/env python3
 import os
 import cv2
 import time
@@ -29,18 +27,43 @@ try:
 except Exception:
     WEB_AVAILABLE = False
 
+# =========================
+# GPIO: tentativa segura + mock
+# =========================
 GPIO_AVAILABLE = True
 try:
-    import RPi.GPIO as GPIO
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
+    import RPi.GPIO as GPIO  # pode levantar ImportError ou RuntimeError
     try:
-        GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.cleanup(21)
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
     except Exception:
+        # Se não conseguir setar mode (por runtime), tratamos abaixo e setamos como não disponível
         GPIO_AVAILABLE = False
 except Exception:
     GPIO_AVAILABLE = False
+
+# Mock caso GPIO não esteja disponível (desenvolvimento em PC)
+if not GPIO_AVAILABLE:
+    class _MockGPIO:
+        BCM = "BCM"
+        IN = "IN"
+        OUT = "OUT"
+        LOW = 0
+        HIGH = 1
+        PUD_UP = "PUD_UP"
+        FALLING = "FALLING"
+        BOTH = "BOTH"
+
+        def setmode(self, *args, **kwargs): pass
+        def setwarnings(self, *args, **kwargs): pass
+        def setup(self, *args, **kwargs): pass
+        def input(self, *args, **kwargs): return self.HIGH
+        def output(self, *args, **kwargs): pass
+        def add_event_detect(self, *args, **kwargs): pass
+        def cleanup(self, *args, **kwargs): pass
+
+    GPIO = _MockGPIO()
+    print("GPIO em modo simulado (mock).")
 
 CANDIDATE_BUTTON_PINS = [21, 4]
 
@@ -81,8 +104,7 @@ class Camera:
         self.picam = None
         self.cap = None
         try:
-            import cv2 as _cv2
-            _cv2.setNumThreads(1)
+            cv2.setNumThreads(1)
         except Exception:
             pass
 
@@ -112,24 +134,36 @@ class Camera:
                 self.picam = None
 
         if self.picam is None:
-            self.cap = cv2.VideoCapture(0)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            if not self.cap.isOpened():
-                raise RuntimeError("Nenhuma câmera disponível.")
+            self._init_usb_camera()
+
+    def _init_usb_camera(self):
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        if not self.cap.isOpened():
+            raise RuntimeError("Nenhuma câmera disponível.")
 
     def read(self):
-        if self.picam is not None:
-            rgb = self.picam.capture_array()
-            frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        else:
-            ok, frame_bgr = self.cap.read()
-            if not ok:
-                raise RuntimeError("Falha ao ler frame da câmera USB.")
-        if self.rotate_180:
-            frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
-        return frame_bgr
+        # tentativa resiliente de leitura: re-tenta algumas vezes antes de falhar
+        for _ in range(3):
+            try:
+                if self.picam is not None:
+                    rgb = self.picam.capture_array()
+                    frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                else:
+                    ok, frame_bgr = self.cap.read()
+                    if not ok:
+                        # tentar reconectar USB
+                        self._init_usb_camera()
+                        continue
+                if self.rotate_180:
+                    frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
+                return frame_bgr
+            except Exception as e:
+                log(f"Erro ao ler frame da câmera: {e} - tentando novamente")
+                time.sleep(0.05)
+        raise RuntimeError("Falha persistente ao ler frame da câmera.")
 
     def release(self):
         try:
@@ -152,20 +186,23 @@ class Robot:
     STRIP_H = 28
     STRIP_BOTTOM = 440
 
-    INTERSECT_DEBOUNCE = 6   # aumentado
+    INTERSECT_DEBOUNCE = 6
     INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
+    C90_DEBOUNCE = 6
     GREEN_DEBOUNCE = 2
 
-    # tempos base (servirão como timeouts máximos no novo método)
     INTERSECT_FWD_TIME = 0.8
     TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 1.2  # tempo máximo aceitável para 90 (usado como timeout)
+    TURN90_TURN_TIME = 1.2
 
-    # bias de giro (reduzido para evitar giros bruscos)
-    TURN_BIAS = 100  # valor +/- para giro in-place
+    TURN_BIAS = 100
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
+
+    # pinos de sensores (se existirem)
+    SENSOR_FRONT = 17
+    SENSOR_LEFT = 27
+    SENSOR_RIGHT = 22
 
     def __init__(self):
         self.running = False
@@ -174,18 +211,20 @@ class Robot:
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=False)
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
-        
-        # Initialize LED controller
-        self.leds = None
-        if USE_LEDS and LedController is not None:
-            self.leds = LedController(brightness=128)  # Half brightness (128/255)
 
         self.history = deque(maxlen=5)
         self._intersect_seen = 0
         self._c90_seen = 0
         self._green_seen = 0
         self._green_last = None
-        self.planned_direction = None
+
+        # tenta configurar pinos de sensores, com tratamento de erros
+        try:
+            GPIO.setup(self.SENSOR_FRONT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(self.SENSOR_LEFT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(self.SENSOR_RIGHT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        except Exception:
+            log("Aviso: não foi possível configurar pinos de sensor (GPIO). Continuando sem sensores físicos.")
 
     def start(self):
         if self.running:
@@ -195,29 +234,22 @@ class Robot:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         SHARED_STATE["status"] = "running"
-        
-        # Turn on white LEDs at half brightness
-        if self.leds is not None:
-            self.leds.set_all(128, 128, 128)  # White at half brightness
-            log("LEDs ligados (branco, meia intensidade).")
-        
         log("Loop principal iniciado.")
 
     def stop(self):
         self.running = False
         SHARED_STATE["status"] = "stopped"
-        try: self.hardware.stop()
-        except Exception: pass
-        
-        # Turn off LEDs
-        if self.leds is not None:
-            self.leds.set_all(0, 0, 0)  # Turn off all LEDs
-            log("LEDs desligados.")
-        
+        try:
+            self.hardware.stop()
+        except Exception:
+            pass
+        try:
+            self.camera.release()
+        except Exception:
+            pass
         log("Parado.")
 
     def _drive(self, base_speed: float, error: float):
-        # mesma compatibilidade que já tinha
         try:
             if hasattr(self.hardware, "set_motor_speed"):
                 self.hardware.set_motor_speed(base_speed, error)
@@ -250,9 +282,7 @@ class Robot:
                 except Exception:
                     pass
             start_time = time.time()
-            while self.running:
-                if time.time() - start_time >= duration_s:
-                    break
+            while self.running and (time.time() - start_time) < duration_s:
                 time.sleep(0.01)
         finally:
             try: self.hardware.stop()
@@ -283,17 +313,15 @@ class Robot:
     def _turn_until_line(self, direction: str, timeout_s: float):
         """
         Gira em pequenos bursts até detectar a linha nos strips inferiores.
-        - direction: "left" ou "right"
-        - timeout_s: timeout máximo total
-        Retorna True se encontrou a linha, False se timeout.
+        Retorna True se encontrou, False se timeout.
         """
         if direction not in ("left", "right"):
             direction = "left"
         sign = 1 if direction == "left" else -1
 
-        base_bias = max(40, min(self.TURN_BIAS, 160))  # limites defensivos
-        step_time = 0.12            # tempo de cada burst (ajuste fino)
-        check_dt = 0.03             # intervalo de amostragem dentro do burst
+        base_bias = max(40, min(self.TURN_BIAS, 160))
+        step_time = 0.12
+        check_dt = 0.03
         max_steps = max(1, int(timeout_s / step_time))
         found = False
         start_time = time.time()
@@ -302,11 +330,9 @@ class Robot:
 
         try:
             for step in range(max_steps):
-                # rampa suave: começa mais suave e aumenta se não encontrar
-                ramp = 0.5 + 0.5 * (step / max_steps)   # entre 0.5 e 1.0
+                ramp = 0.5 + 0.5 * (step / max_steps)
                 bias = int(sign * base_bias * ramp)
 
-                # aplica o comando de giro por pequenos intervalos e verifica frame a cada check_dt
                 burst_start = time.time()
                 while (time.time() - burst_start) < step_time and (time.time() - start_time) < timeout_s and self.running:
                     try:
@@ -325,21 +351,20 @@ class Robot:
                     except Exception:
                         pass
 
-                    # pega frame e checa reaparição da linha nos 2 strips inferiores
+                    # verifica frame
                     try:
                         frame = self.camera.read()
                         bw = self._binarize(frame)
-                        for k in range(2):   # verificar 2 strips inferiores
+                        for k in range(2):
                             y0 = self.STRIP_BOTTOM - k*self.STRIP_H
                             c, w = self._strip_centroid(bw, y0, self.STRIP_H)
                             if c is not None and w > 0:
                                 found = True
-                                log(f"Linha encontrada durante giro (step {step}, burst): strip={k} c={c} w={w}")
+                                log(f"Linha encontrada durante giro (step {step}): strip={k} c={c} w={w}")
                                 break
                         if found:
                             break
                     except Exception:
-                        # ignorar falha de frame e continuar
                         pass
 
                     time.sleep(check_dt)
@@ -347,10 +372,9 @@ class Robot:
                 if found or (time.time() - start_time) >= timeout_s or not self.running:
                     break
 
-            # se não encontrou, tenta um pequeno movimento compensatório no sentido oposto (anti-stuck)
+            # anti-stuck pequeno oposto
             if not found and self.running:
-                log("Não encontrou linha: tentativa rápida oposta (anti-stuck)")
-                # curto burst oposto
+                log("Não encontrou linha: tentativa anti-stuck oposta")
                 opp_sign = -sign
                 opp_bias = int(opp_sign * base_bias * 0.6)
                 try:
@@ -390,7 +414,6 @@ class Robot:
             except Exception: pass
 
         if found:
-            # dá um pequeno avanço para estabilizar sobre a linha (reduz overshoot no retorno ao loop)
             try:
                 log("Avançando um pouco para estabilizar após encontrar a linha")
                 if hasattr(self.hardware, "set_motor_speed"):
@@ -410,7 +433,13 @@ class Robot:
     def _loop(self):
         try:
             while self.running:
-                frame = self.camera.read()
+                try:
+                    frame = self.camera.read()
+                except Exception as e:
+                    log(f"Falha ao ler câmera no loop: {e}")
+                    time.sleep(0.05)
+                    continue
+
                 bw = self._binarize(frame)
 
                 cents, widths = [], []
@@ -437,7 +466,6 @@ class Robot:
                     self._intersect_seen = 0
                 confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
 
-                # DETECÇÃO DE VERDE (usa Vision.detect_greens se existir; fallback interno caso contrário)
                 green_centroids, green_dir = self._detect_greens(frame)
                 if green_dir:
                     self._green_last = green_dir
@@ -446,15 +474,13 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # Prioridade: curvas 90 confirmadas
+                # prioridade: curva 90 confirmada
                 if confirmed_curve90:
                     dir_to_turn = curve_dir or confirmed_green or self._infer_curve_direction(valids, angle)
                     log(f"Curva 90° confirmada -> direção: {dir_to_turn}")
-                    # anda um pouco e gira até encontrar linha (timeout = TURN90_TURN_TIME)
                     self._forward_time(self.TURN90_FWD_TIME)
                     found = self._turn_until_line(dir_to_turn, timeout_s=self.TURN90_TURN_TIME)
                     if not found:
-                        # fallback: girar por tempo reduzido (evita 180°)
                         fallback_time = min(self.TURN90_TURN_TIME, 0.9)
                         log(f"Fallback: girar por tempo fixo {fallback_time:.2f}s")
                         self._turn_in_place_time(direction=dir_to_turn, duration_s=fallback_time)
@@ -464,15 +490,13 @@ class Robot:
                     self._green_last = None
                     continue
 
-                # Interseções
+                # interseções
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         log("Interseção com sinal verde (UTURN) detectada -> executando U-turn")
                         self._forward_time(self.INTERSECT_FWD_TIME)
-                        # U-turn: tenta girar até achar linha duas vezes, timeout maior
                         found = self._turn_until_line("left", timeout_s=self.TURN90_TURN_TIME * 3)
                         if not found:
-                            # se não achou, fallback para tempo (maior)
                             self._turn_in_place_time("left", duration_s=self.TURN90_TURN_TIME * 2)
                         self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         continue
@@ -481,7 +505,6 @@ class Robot:
                         self._forward_time(self.TURN90_FWD_TIME)
                         found = self._turn_until_line(confirmed_green, timeout_s=self.TURN90_TURN_TIME)
                         if not found:
-                            # fallback curto
                             self._turn_in_place_time(confirmed_green, duration_s=min(self.TURN90_TURN_TIME, 0.9))
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
@@ -491,17 +514,39 @@ class Robot:
                         self._intersect_seen = 0
                         continue
 
-                # Seguimento normal
+                # seguimento normal
                 if valids:
                     offset = valids[0][0] - (self.WIDTH // 2)
                     error = float(offset) + self.MIX_ANGLE * float(angle)
                     self._drive(self.BASE_SPEED, error)
                 else:
-                    log("Linha perdida: parando e esperando (ou implementar busca mais avançada)")
-                    try:
-                        self.hardware.stop()
-                    except Exception:
-                        pass
+                    # Se perder a linha, tenta busca automática (antes de simplesmente parar)
+                    log("Linha perdida: iniciando busca automática")
+                    found = self._turn_until_line("left", timeout_s=1.0)
+                    if not found:
+                        found = self._turn_until_line("right", timeout_s=1.0)
+                    if not found:
+                        # se ainda não encontrou, para e tenta anti-stuck curto
+                        log("Busca automática falhou: executando anti-stuck (pequeno avanço e recuo)")
+                        try:
+                            if hasattr(self.hardware, "set_motor_speed"):
+                                self.hardware.set_motor_speed(int(self.BASE_SPEED*0.5), 0)
+                            elif hasattr(self.hardware, "drive"):
+                                self.hardware.drive(int(self.BASE_SPEED*0.5), int(self.BASE_SPEED*0.5))
+                            time.sleep(0.18)
+                            self.hardware.stop()
+                        except Exception:
+                            pass
+                        try:
+                            # recuar levemente
+                            if hasattr(self.hardware, "set_motor_speed"):
+                                self.hardware.set_motor_speed(-int(self.BASE_SPEED*0.4), 0)
+                            elif hasattr(self.hardware, "drive"):
+                                self.hardware.drive(-int(self.BASE_SPEED*0.4), -int(self.BASE_SPEED*0.4))
+                            time.sleep(0.12)
+                            self.hardware.stop()
+                        except Exception:
+                            pass
 
                 # atualiza estado para UI
                 left_spd = getattr(self.hardware, "last_left_speed", 0)
@@ -515,10 +560,11 @@ class Robot:
             try: self.hardware.stop()
             except Exception: pass
 
-    # ==== visão utilitários (mantidos) ====
+    # ===== visão utilitários =====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
+        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                   cv2.THRESH_BINARY_INV, 21, 7)
         return bw
 
     def _strip_centroid(self, bw, y0, h):
@@ -635,23 +681,30 @@ def _wire_web(robot: Robot):
         log(f"Falha ao integrar com web_stream: {e}")
 
 def _setup_button(robot: Robot):
-    if not GPIO_AVAILABLE:
-        log("GPIO indisponível: sem botão físico.")
-        return
-    for pin in [21, 4]:
+    # configura botão físico com fallback (não falha se GPIO não disponível)
+    for pin in CANDIDATE_BUTTON_PINS:
         try:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             def _toggle(channel, _pin=pin):
-                if GPIO.input(_pin) == GPIO.LOW:
-                    if robot.running:
-                        robot.stop()
-                    else:
-                        robot.start()
-            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
+                try:
+                    if GPIO.input(_pin) == GPIO.LOW:
+                        if robot.running:
+                            robot.stop()
+                        else:
+                            robot.start()
+                except Exception:
+                    pass
+            # usa FALLING com debounce se suportado
+            try:
+                GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
+            except TypeError:
+                # mock ou driver sem bouncetime suportado
+                GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle)
             log(f"Botão físico pronto no BCM {pin}.")
             break
         except Exception as e:
             log(f"Falha botão BCM {pin}: {e}")
+            continue
 
 def main():
     robot = Robot()
