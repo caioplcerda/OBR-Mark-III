@@ -15,7 +15,6 @@ try:
     import RPi.GPIO as GPIO
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
-    # NÃO execute cleanup aqui — apenas teste a importação / modo
 except Exception as e:
     print(f"Erro ao importar RPi.GPIO: {e}")
     GPIO_AVAILABLE = False
@@ -48,7 +47,6 @@ except Exception as e:
 
 
 class SharedState:
-    """Gerencia o estado compartilhado entre threads com bloqueio de concorrência."""
     def __init__(self):
         self._lock = threading.Lock()
         self._state = {
@@ -83,7 +81,6 @@ SHARED_STATE = SharedState()
 
 
 def log(msg: str) -> None:
-    """Adiciona uma mensagem ao log com timestamp."""
     SHARED_STATE.append_log(msg)
 
 
@@ -100,7 +97,6 @@ CONFIG_DEFAULTS = {
 
 
 class Camera:
-    """Gerencia a captura de vídeo via Picamera2 ou OpenCV."""
     def __init__(self, width: int, height: int, rotate_180: bool):
         self.width = width
         self.height = height
@@ -115,7 +111,6 @@ class Camera:
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
-                # build kwargs apenas se Transform estiver disponível
                 cfg_kwargs = {
                     "main": {"size": (self.width, self.height), "format": "RGB888"},
                     "buffer_count": 3
@@ -133,7 +128,6 @@ class Camera:
                     )
                 self.picam.configure(cfg)
                 try:
-                    # set_controls pode não estar presente em algumas builds — proteja
                     self.picam.set_controls({"FrameDurationLimits": (10000, 33333)})
                 except Exception:
                     pass
@@ -216,7 +210,6 @@ class Camera:
 
 
 class LineFollowerController:
-    """Controlador PD para seguir linha com suavização de erro."""
     def __init__(self, config: Dict):
         self.max_speed: int = config["robot"]["max_speed"]
         self.base_speed: int = config["robot"]["base_speed"]
@@ -248,13 +241,26 @@ class LineFollowerController:
 
 
 class Robot:
-    """Controla um robô seguidor de linha com visão computacional."""
     def __init__(self):
         if HardwareControl is None or Vision is None:
             raise RuntimeError("Módulos hardware_control ou vision não disponíveis.")
         config = CONFIG_DEFAULTS
         self.camera: Camera = Camera(**config["camera"])
         self.vision: Vision = Vision({}, log)
+
+        # Fallback se Vision não tiver strip_centroid
+        if not hasattr(self.vision, "strip_centroid"):
+            log("Vision sem strip_centroid — usando fallback interno.")
+            def _fallback_strip_centroid(bw, y, h):
+                roi = bw[y:y+h, :]
+                M = cv2.moments(roi)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"]) + y
+                    return (cx, cy), roi
+                return None, roi
+            self.vision.strip_centroid = _fallback_strip_centroid
+
         self.hardware: HardwareControl = HardwareControl({"pid": {}})
         self.controller: LineFollowerController = LineFollowerController(config)
         self.width: int = config["camera"]["width"]
@@ -263,7 +269,6 @@ class Robot:
         self.thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        """Inicia o loop principal do robô."""
         if self.running:
             log("Robô já está rodando.")
             return
@@ -274,7 +279,6 @@ class Robot:
         log("Loop principal iniciado.")
 
     def stop(self) -> None:
-        """Para o robô e libera recursos."""
         self.running = False
         SHARED_STATE.set("status", "stopped")
         try:
@@ -295,11 +299,9 @@ class Robot:
                 start_time = time.time()
                 frame = self.camera.read()
                 bw = self._binarize(frame)
-                # usa visão para extrair centróide (assume função strip_centroid na Vision)
                 centroid, _ = self.vision.strip_centroid(bw, self.height - 50, 40)
                 left_speed, right_speed = self.controller.compute_speeds(centroid, self.width)
                 try:
-                    # drive pode lançar — proteja para não quebrar o loop inteiro
                     self.hardware.drive(left_speed, right_speed)
                 except Exception as e:
                     log(f"Erro ao enviar comandos aos motores: {e}")
@@ -312,14 +314,12 @@ class Robot:
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
-            # não chame self.stop() aqui para evitar join recursivo quando o loop for disparado pela thread
             try:
                 self.hardware.stop()
             except Exception:
                 pass
 
     def _binarize(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """Binariza a imagem para detecção de linha."""
         try:
             gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
@@ -344,12 +344,11 @@ class Robot:
 
 
 def _setup_button(robot: Robot) -> None:
-    """Configura botão físico para iniciar/parar o robô."""
     if not GPIO_AVAILABLE:
         log("GPIO indisponível: sem botão físico.")
         return
-    for pin in CANDIDATE_BUTTON_PINS:
-        try:
+    try:
+        for pin in CANDIDATE_BUTTON_PINS:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             last_state = GPIO.input(pin)
             last_change = time.time()
@@ -357,7 +356,7 @@ def _setup_button(robot: Robot) -> None:
             def _toggle(channel):
                 nonlocal last_state, last_change
                 try:
-                    current_state = GPIO.input(pin)
+                    current_state = GPIO.input(channel)
                     current_time = time.time()
                     if current_state == GPIO.LOW and last_state == GPIO.HIGH and (current_time - last_change) > 0.3:
                         if robot.running:
@@ -367,26 +366,21 @@ def _setup_button(robot: Robot) -> None:
                         last_change = current_time
                     last_state = current_state
                 except Exception as e:
-                    log(f"Erro no callback do botão BCM {pin}: {e}")
+                    log(f"Erro no callback do botão BCM {channel}: {e}")
 
-            # bouncetime para evitar múltiplas detecções
             GPIO.add_event_detect(pin, GPIO.BOTH, callback=_toggle, bouncetime=300)
             log(f"Botão físico pronto no BCM {pin}.")
             break
-        except Exception as e:
-            log(f"Falha ao configurar botão BCM {pin}: {e}")
+    except Exception as e:
+        log(f"GPIO não funcional neste ambiente: {e}")
+        return
 
 
 def main():
-    """Função principal para executar o robô."""
     try:
         with Robot() as robot:
-            # _wire_web(robot)  # Comentar até que web_stream esteja disponível
             _setup_button(robot)
-
-            # Inicia automaticamente para depuração (se você preferir só botão, remova esta linha)
             robot.start()
-
             try:
                 log("Loop principal (pressione Ctrl+C para sair).")
                 while True:
