@@ -1,5 +1,5 @@
 # main.py corrigido (giro incremental substituído para evitar overshoot 180°)
-# agora com avanço extra quando há sinal verde (GREEN_FORWARD_EXTRA)
+# Substitui _turn_until_line por uma versão incremental em bursts.
 
 import os
 import cv2
@@ -162,9 +162,6 @@ class Robot:
     TURN90_FWD_TIME = 0.4
     TURN90_TURN_TIME = 1.2  # tempo máximo aceitável para 90 (usado como timeout)
 
-    # **novo**: tempo extra para avançar quando há sinal verde
-    GREEN_FORWARD_EXTRA = 0.25  # segundos — ajusta quanto avançar a mais no verde
-
     # bias de giro (reduzido para evitar giros bruscos)
     TURN_BIAS = 100  # valor +/- para giro in-place
 
@@ -177,6 +174,11 @@ class Robot:
         self.camera = Camera(self.WIDTH, self.HEIGHT, rotate_180=False)
         self.vision = Vision({}, log)
         self.hardware = HardwareControl({"pid": dict(self.PID_DEFAULTS)})
+        
+        # Initialize LED controller
+        self.leds = None
+        if USE_LEDS and LedController is not None:
+            self.leds = LedController(brightness=128)  # Half brightness (128/255)
 
         self.history = deque(maxlen=5)
         self._intersect_seen = 0
@@ -193,6 +195,12 @@ class Robot:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         SHARED_STATE["status"] = "running"
+        
+        # Turn on white LEDs at half brightness
+        if self.leds is not None:
+            self.leds.set_all(128, 128, 128)  # White at half brightness
+            log("LEDs ligados (branco, meia intensidade).")
+        
         log("Loop principal iniciado.")
 
     def stop(self):
@@ -200,6 +208,12 @@ class Robot:
         SHARED_STATE["status"] = "stopped"
         try: self.hardware.stop()
         except Exception: pass
+        
+        # Turn off LEDs
+        if self.leds is not None:
+            self.leds.set_all(0, 0, 0)  # Turn off all LEDs
+            log("LEDs desligados.")
+        
         log("Parado.")
 
     def _drive(self, base_speed: float, error: float):
@@ -436,11 +450,8 @@ class Robot:
                 if confirmed_curve90:
                     dir_to_turn = curve_dir or confirmed_green or self._infer_curve_direction(valids, angle)
                     log(f"Curva 90° confirmada -> direção: {dir_to_turn}")
-
-                    # --- AQUI: se houver green, avança um pouco mais antes da curva ---
-                    forward_before_turn = self.TURN90_FWD_TIME + (self.GREEN_FORWARD_EXTRA if confirmed_green else 0.0)
-                    self._forward_time(forward_before_turn)
-
+                    # anda um pouco e gira até encontrar linha (timeout = TURN90_TURN_TIME)
+                    self._forward_time(self.TURN90_FWD_TIME)
                     found = self._turn_until_line(dir_to_turn, timeout_s=self.TURN90_TURN_TIME)
                     if not found:
                         # fallback: girar por tempo reduzido (evita 180°)
@@ -457,9 +468,8 @@ class Robot:
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         log("Interseção com sinal verde (UTURN) detectada -> executando U-turn")
-                        # adiciona extra se green confirmado (uturn)
-                        forward_time = self.INTERSECT_FWD_TIME + self.GREEN_FORWARD_EXTRA
-                        self._forward_time(forward_time)
+                        self._forward_time(self.INTERSECT_FWD_TIME)
+                        # U-turn: tenta girar até achar linha duas vezes, timeout maior
                         found = self._turn_until_line("left", timeout_s=self.TURN90_TURN_TIME * 3)
                         if not found:
                             # se não achou, fallback para tempo (maior)
@@ -468,9 +478,7 @@ class Robot:
                         continue
                     elif confirmed_green in ("left", "right"):
                         log(f"Interseção com sinal verde ({confirmed_green}) -> executando curva")
-                        # adiciona extra quando o verde indica direção
-                        forward_time = self.TURN90_FWD_TIME + self.GREEN_FORWARD_EXTRA
-                        self._forward_time(forward_time)
+                        self._forward_time(self.TURN90_FWD_TIME)
                         found = self._turn_until_line(confirmed_green, timeout_s=self.TURN90_TURN_TIME)
                         if not found:
                             # fallback curto
@@ -615,29 +623,6 @@ class Robot:
             else:
                 return "right"
         return "left"
-
-    # mantenho este utilitário caso o fallback precise usar tempo fixo
-    def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = self.TURN_BIAS if direction == "left" else -self.TURN_BIAS
-        start = time.time()
-        try:
-            while self.running and (time.time() - start) < duration_s:
-                try:
-                    if hasattr(self.hardware, "set_motor_speed"):
-                        self.hardware.set_motor_speed(0, bias)
-                    elif hasattr(self.hardware, "drive"):
-                        l = int(-bias/2); r = int(bias/2)
-                        self.hardware.drive(l, r)
-                    elif hasattr(self.hardware, "set_motors"):
-                        self.hardware.set_motors(0, bias)
-                    elif hasattr(self.hardware, "write_pwm"):
-                        self.hardware.write_pwm(left_cmd=float(-bias), right_cmd=float(bias))
-                except Exception:
-                    pass
-                time.sleep(0.02)
-        finally:
-            try: self.hardware.stop()
-            except Exception: pass
 
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
