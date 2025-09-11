@@ -1,16 +1,9 @@
-# main.py corrigido
-# Segue-linha robusto + UI web + botão físico (21/4).
-# Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
-# Interseções e C90 agora exigem mais frames (debounce maior).
-# Loops respeitam botão STOP sempre.
-
 import os
 import cv2
 import time
 import json
 import threading
 import numpy as np
-import math
 from datetime import datetime
 from collections import deque
 
@@ -47,8 +40,6 @@ try:
 except Exception:
     GPIO_AVAILABLE = False
 
-CANDIDATE_BUTTON_PINS = [21, 4]
-
 from hardware_control import HardwareControl
 from vision import Vision
 try:
@@ -67,6 +58,7 @@ try:
 except Exception:
     PICAMERA_AVAILABLE = False
 
+
 def log(msg: str):
     stamp = datetime.now().strftime("%H:%M:%S")
     line = f"[{stamp}] {msg}"
@@ -77,6 +69,7 @@ def log(msg: str):
             SHARED_STATE["log"] = SHARED_STATE["log"][-300:]
     except Exception:
         pass
+
 
 class Camera:
     def __init__(self, width=640, height=480, rotate_180=False):
@@ -145,11 +138,13 @@ class Camera:
         except Exception:
             pass
 
+
 class Robot:
     WIDTH = 640
     HEIGHT = 480
 
     BASE_SPEED = 30
+    TURN_SPEED = 18
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
@@ -157,15 +152,18 @@ class Robot:
     STRIP_H = 28
     STRIP_BOTTOM = 440
 
-    INTERSECT_DEBOUNCE = 6   # aumentado
+    INTERSECT_DEBOUNCE = 6
     INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
+    C90_DEBOUNCE = 6
     GREEN_DEBOUNCE = 2
 
-    # tempos em segundos ao invés de ticks
-    INTERSECT_FWD_TIME = 0.8
-    TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 1.2
+    INTERSECT_FWD_TIME = 0.7
+    TURN90_FWD_TIME = 0.3
+    TURN90_TURN_TIME = 0.75
+
+    TURN_BIAS = 60
+    TURN_BIAS_SIGN = 1
+    TURN_DIRECTION_INVERT = False
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
@@ -179,11 +177,13 @@ class Robot:
 
         self.history = deque(maxlen=5)
         self._intersect_seen = 0
+        self._intersect_ahead_seen = 0
         self._c90_seen = 0
         self._green_seen = 0
         self._green_last = None
         self.planned_direction = None
 
+    # ciclo de vida
     def start(self):
         if self.running:
             log("Robô já está rodando.")
@@ -197,190 +197,115 @@ class Robot:
     def stop(self):
         self.running = False
         SHARED_STATE["status"] = "stopped"
-        try: self.hardware.stop()
-        except Exception: pass
-        log("Parado.")
+        try:
+            self.hardware.stop()
+        except Exception:
+            pass
+        log("Parado (stop chamado).")
 
+    # controle
     def _drive(self, base_speed: float, error: float):
         try:
             self.hardware.set_motor_speed(base_speed, error)
         except Exception:
             pass
 
-    def _forward_time(self, duration_s: float):
+    def _forward_time(self, duration_s: float, reason: str = "forward"):
+        log(f"➡️ Avançando {duration_s:.2f}s | motivo={reason}")
         self.hardware.set_motor_speed(self.BASE_SPEED, 0)
         start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
+        while self.running and (time.time() - start_time < duration_s):
             time.sleep(0.01)
         self.hardware.stop()
+        log(f"✅ Avanço concluído | motivo={reason}")
 
-    def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = 120 if direction == "left" else -120
-        start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
-            self.hardware.set_motor_speed(0, bias)
-            time.sleep(0.01)
-        self.hardware.stop()
+    # utilitários de direção
+    def set_turn_direction_invert(self, invert: bool):
+        self.TURN_DIRECTION_INVERT = bool(invert)
+        log(f"Configuração: TURN_DIRECTION_INVERT = {self.TURN_DIRECTION_INVERT}")
 
-    def _loop(self):
+    def toggle_turn_direction_invert(self):
+        self.TURN_DIRECTION_INVERT = not self.TURN_DIRECTION_INVERT
+        log(f"Toggled: TURN_DIRECTION_INVERT = {self.TURN_DIRECTION_INVERT}")
+
+    def set_turn_bias_sign(self, sign: int):
+        self.TURN_BIAS_SIGN = 1 if sign >= 0 else -1
+        log(f"Configuração: TURN_BIAS_SIGN = {self.TURN_BIAS_SIGN}")
+
+    def _compute_turn_params(self, direction: str, arc: bool = True):
+        requested = (direction or "left").lower()
+        if requested not in ("left", "right"):
+            requested = "left"
+
+        applied = requested if not self.TURN_DIRECTION_INVERT else ("left" if requested == "right" else "right")
+
+        if arc:
+            base = int(self.TURN_SPEED * 0.6)
+        else:
+            base = 0
+
+        raw_bias = self.TURN_BIAS if applied == "left" else -self.TURN_BIAS
+        bias = raw_bias * self.TURN_BIAS_SIGN
+
+        if arc:
+            bias = int(bias * 0.75)
+
+        log(f"[TURN PARAMS] req={requested} -> applied={applied} | base={base} | bias={bias} (arc={arc})")
+        return requested, applied, base, bias
+
+    def _turn_in_place_time(self, direction: str, duration_s: float, reason: str = "turn", arc: bool = True):
+        requested, applied, base, bias = self._compute_turn_params(direction, arc=arc)
+
+        log(f"↪️ Iniciando TURN | requested={requested} | applied={applied} | duration={duration_s:.2f}s | reason={reason}")
+        start = time.time()
         try:
-            while self.running:
-                frame = self.camera.read()
-                bw = self._binarize(frame)
-
-                cents, widths = [], []
-                for i in range(self.N_STRIPS):
-                    y0 = self.STRIP_BOTTOM - i*self.STRIP_H
-                    c, w = self._strip_centroid(bw, y0, self.STRIP_H)
-                    cents.append(c)
-                    widths.append(w)
-
-                valids = [p for p in cents if p is not None]
-                angle = self._fit_angle(valids)
-
-                is_intersection, is_curve90, _ = self._detect_intersection(bw, widths, cents, angle)
-
-                if is_curve90:
-                    self._c90_seen += 1
-                else:
-                    self._c90_seen = 0
-                confirmed_curve90 = self._c90_seen >= self.C90_DEBOUNCE
-
-                if is_intersection:
-                    self._intersect_seen += 1
-                else:
-                    self._intersect_seen = 0
-                confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
-
-                green_centroids, green_dir = self.vision.detect_greens(frame)
-                if green_dir:
-                    self._green_last = green_dir
-                    self._green_seen += 1
-                else:
-                    self._green_seen = 0
-                confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
-
-                if confirmed_intersection and not confirmed_curve90:
-                    if confirmed_green == "uturn":
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
-                        self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
-                        continue
-                    elif confirmed_green in ("left", "right"):
-                        self._forward_time(self.TURN90_FWD_TIME)
-                        self._turn_in_place_time(confirmed_green, self.TURN90_TURN_TIME)
-                        self._green_seen = 0; self._intersect_seen = 0
-                        continue
-                    else:
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._intersect_seen = 0
-                        continue
-
-                if valids:
-                    offset = valids[0][0] - (self.WIDTH // 2)
-                    error = float(offset) + self.MIX_ANGLE * float(angle)
-                    self._drive(self.BASE_SPEED, error)
-                else:
-                    self.hardware.stop()
-
-                SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["speeds"] = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
+            while self.running and (time.time() - start < duration_s):
+                self.hardware.set_motor_speed(base, bias)
                 time.sleep(0.01)
-        except Exception as e:
-            log(f"Erro no loop principal: {e}")
         finally:
-            try: self.hardware.stop()
-            except Exception: pass
+            self.hardware.stop()
+            log(f"✅ TURN finalizado | applied={applied} | reason={reason}")
 
-    # ==== visão utilitários (mesmos do original) ====
-    def _binarize(self, frame_bgr):
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
-        return bw
-
-    def _strip_centroid(self, bw, y0, h):
-        H, W = bw.shape[:2]
-        y0 = max(0, min(H - 1, int(y0)))
-        y1 = max(0, min(H, int(y0 + h)))
-        roi = bw[y0:y1, :]
-        colsum = roi.sum(axis=0)
-        if colsum.max() < 255 * h * 0.05:
-            return None, 0
-        x = np.arange(0, W, dtype=np.float32)
-        cx = float((x * colsum).sum() / (colsum.sum() + 1e-6))
-        cy = int((y0 + y1) / 2)
-        return (int(cx), int(cy)), int(np.count_nonzero(colsum))
-
-    def _fit_angle(self, pts):
-        if len(pts) < 2:
-            return 0.0
-        xs = np.array([p[0] for p in pts], dtype=np.float32)
-        ys = np.array([p[1] for p in pts], dtype=np.float32)
-        A = np.vstack([ys, np.ones_like(ys)]).T
-        alpha, _ = np.linalg.lstsq(A, xs, rcond=None)[0]
-        angle_deg = np.degrees(np.arctan2(alpha, 1.0))
-        return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
-
-    def _detect_intersection(self, bw, widths, cents, angle_deg):
-        # simplificado: só checa largura média
-        wide = sum(widths[:2]) > 300
-        ang_high = abs(angle_deg) > 28
-        return wide, ang_high, False
-
-def _wire_web(robot: Robot):
-    if not WEB_AVAILABLE:
-        return
-    try:
-        if hasattr(web_stream, "register_robot"):
-            web_stream.register_robot(robot)
-            log("Robô registrado no servidor web.")
-    except Exception as e:
-        log(f"Falha ao integrar com web_stream: {e}")
-
-def _setup_button(robot: Robot):
-    if not GPIO_AVAILABLE:
-        log("GPIO indisponível: sem botão físico.")
-        return
-    for pin in [21, 4]:
+    def test_turn_sign(self, duration: float = 0.35, small_bias: int = 30):
+        log("🔧 Teste de direção de giro iniciado. Observe o lado para +bias e -bias.")
         try:
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            def _toggle(channel):
-                if GPIO.input(pin) == GPIO.LOW:
-                    if robot.running:
-                        robot.stop()
-                    else:
-                        robot.start()
-            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
-            log(f"Botão físico pronto no BCM {pin}.")
-            break
+            log(f"Teste PART 1: bias = +{small_bias}")
+            self.hardware.set_motor_speed(0, int(small_bias))
+            time.sleep(duration)
+            self.hardware.stop()
+            time.sleep(0.15)
+
+            log(f"Teste PART 2: bias = -{small_bias}")
+            self.hardware.set_motor_speed(0, int(-small_bias))
+            time.sleep(duration)
+            self.hardware.stop()
+            log("🔧 Teste concluído. Ajuste TURN_BIAS_SIGN ou TURN_DIRECTION_INVERT se necessário.")
         except Exception as e:
-            log(f"Falha botão BCM {pin}: {e}")
+            log(f"Erro no teste de giro: {e}")
+            try:
+                self.hardware.stop()
+            except Exception:
+                pass
 
-def main():
-    robot = Robot()
-    _wire_web(robot)
-    _setup_button(robot)
+    # eventos de visão
+    def on_intersection(self):
+        log("🟦 Interseção detectada!")
+        self._forward_time(self.INTERSECT_FWD_TIME, reason="intersection")
 
-    if WEB_AVAILABLE and hasattr(web_stream, "app"):
-        host = os.environ.get("HOST", "0.0.0.0")
-        port = int(os.environ.get("PORT", "5000"))
-        try:
-            if hasattr(web_stream, "socketio"):
-                web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
-            else:
-                web_stream.app.run(host=host, port=port)
-        finally:
-            robot.stop()
-    else:
-        try:
-            while True:
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            robot.stop()
+    def on_curve_90(self, direction="left"):
+        log(f"🟨 Curva de 90° detectada ({direction})")
+        self._forward_time(self.TURN90_FWD_TIME, reason="curve_prep")
+        self._turn_in_place_time(direction, self.TURN90_TURN_TIME, reason="curve_90", arc=True)
 
-if __name__ == "__main__":
-    main()
+    def on_green_marker(self):
+        log("🟩 Marcador verde detectado!")
+        self._forward_time(0.5, reason="green_marker")
+
+    # loop principal (esqueleto, depende da Vision)
+    def _loop(self):
+        while self.running:
+            frame = self.camera.read()
+            result = self.vision.process(frame)
+            # aqui você chama on_intersection(), on_curve_90(), on_green_marker()
+            # dependendo de result
+            time.sleep(0.01)
