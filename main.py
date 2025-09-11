@@ -149,7 +149,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 30
+    BASE_SPEED = 10
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
@@ -165,7 +165,7 @@ class Robot:
     # tempos em segundos ao invés de ticks
     INTERSECT_FWD_TIME = 0.8
     TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 0.7  # reduzido de 0.9 para 0.7 para evitar giro excessivo em curvas C90
+    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
@@ -264,15 +264,6 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # Priorizar C90 turns
-                if confirmed_curve90:
-                    direction = "left" if angle > 0 else "right"
-                    self._forward_time(self.TURN90_FWD_TIME)
-                    self._turn_in_place_time(direction, self.TURN90_TURN_TIME)
-                    self._c90_seen = 0
-                    continue
-
-                # Tratar interseções apenas se não for uma curva C90
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         self._forward_time(self.INTERSECT_FWD_TIME)
@@ -363,4 +354,34 @@ def _setup_button(robot: Robot):
                         robot.stop()
                     else:
                         robot.start()
-            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=
+            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
+            log(f"Botão físico pronto no BCM {pin}.")
+            break
+        except Exception as e:
+            log(f"Falha botão BCM {pin}: {e}")
+
+def main():
+    robot = Robot()
+    _wire_web(robot)
+    _setup_button(robot)
+
+    if WEB_AVAILABLE and hasattr(web_stream, "app"):
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "5000"))
+        try:
+            if hasattr(web_stream, "socketio"):
+                web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
+            else:
+                web_stream.app.run(host=host, port=port)
+        finally:
+            robot.stop()
+    else:
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            robot.stop()
+
+if __name__ == "__main__":
+    main()
+
