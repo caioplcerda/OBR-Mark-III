@@ -8,32 +8,28 @@ from collections import deque
 from typing import Dict, Optional, Tuple
 
 USE_LEDS = True
-WEB_AVAILABLE = True
+WEB_AVAILABLE = False  # Desativado temporariamente para depuração
 GPIO_AVAILABLE = True
-
-try:
-    import web_stream
-    if hasattr(web_stream, "SHARED_STATE"):
-        WEB_AVAILABLE = True
-except Exception:
-    WEB_AVAILABLE = False
 
 try:
     import RPi.GPIO as GPIO
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
-    try:
-        GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.cleanup(21)
-    except Exception:
-        GPIO_AVAILABLE = False
-except Exception:
+    # NÃO execute cleanup aqui — apenas teste a importação / modo
+except Exception as e:
+    print(f"Erro ao importar RPi.GPIO: {e}")
     GPIO_AVAILABLE = False
 
 CANDIDATE_BUTTON_PINS = [21, 4]
 
-from hardware_control import HardwareControl
-from vision import Vision
+try:
+    from hardware_control import HardwareControl
+    from vision import Vision
+except ImportError as e:
+    print(f"Erro ao importar módulos de hardware ou visão: {e}")
+    HardwareControl = None
+    Vision = None
+
 try:
     from led_control import LedController
 except Exception:
@@ -46,7 +42,8 @@ try:
         from libcamera import Transform
     except Exception:
         Transform = None
-except Exception:
+except Exception as e:
+    print(f"Erro ao importar picamera2: {e}")
     PICAMERA_AVAILABLE = False
 
 
@@ -64,11 +61,11 @@ class SharedState:
             "log": []
         }
 
-    def get(self, key: str) -> any:
+    def get(self, key: str):
         with self._lock:
             return self._state.get(key)
 
-    def set(self, key: str, value: any) -> None:
+    def set(self, key: str, value) -> None:
         with self._lock:
             self._state[key] = value
 
@@ -112,19 +109,34 @@ class Camera:
         self.cap = None
         try:
             cv2.setNumThreads(1)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Erro ao configurar OpenCV threads: {e}")
 
         if PICAMERA_AVAILABLE:
             try:
                 self.picam = Picamera2()
-                cfg = self.picam.create_video_configuration(
-                    main={"size": (self.width, self.height), "format": "RGB888"},
-                    transform=Transform(hflip=0, vflip=0) if Transform else None,
-                    buffer_count=3
-                )
+                # build kwargs apenas se Transform estiver disponível
+                cfg_kwargs = {
+                    "main": {"size": (self.width, self.height), "format": "RGB888"},
+                    "buffer_count": 3
+                }
+                if Transform is not None:
+                    cfg = self.picam.create_video_configuration(
+                        main=cfg_kwargs["main"],
+                        transform=Transform(hflip=0, vflip=0),
+                        buffer_count=cfg_kwargs["buffer_count"]
+                    )
+                else:
+                    cfg = self.picam.create_video_configuration(
+                        main=cfg_kwargs["main"],
+                        buffer_count=cfg_kwargs["buffer_count"]
+                    )
                 self.picam.configure(cfg)
-                self.picam.set_controls({"FrameDurationLimits": (10000, 33333)})
+                try:
+                    # set_controls pode não estar presente em algumas builds — proteja
+                    self.picam.set_controls({"FrameDurationLimits": (10000, 33333)})
+                except Exception:
+                    pass
                 self.picam.start()
                 log("Picamera2 iniciada em modo vídeo.")
             except Exception as e:
@@ -135,17 +147,25 @@ class Camera:
             self._init_usb_camera()
 
     def _init_usb_camera(self) -> None:
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        if not self.cap.isOpened():
-            raise RuntimeError("Nenhuma câmera disponível.")
+        try:
+            self.cap = cv2.VideoCapture(0)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            if not self.cap.isOpened():
+                raise RuntimeError("Nenhuma câmera USB disponível.")
+            log("Câmera USB inicializada.")
+        except Exception as e:
+            log(f"Erro ao inicializar câmera USB: {e}")
+            raise
 
     def _reconnect_usb(self) -> None:
         try:
             if self.cap is not None:
-                self.cap.release()
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
             self._init_usb_camera()
             log("Câmera USB reconectada com sucesso.")
         except Exception as e:
@@ -153,7 +173,7 @@ class Camera:
             raise RuntimeError("Falha ao reconectar câmera USB.")
 
     def read(self) -> np.ndarray:
-        for _ in range(3):
+        for attempt in range(3):
             try:
                 if self.picam is not None:
                     rgb = self.picam.capture_array()
@@ -167,18 +187,26 @@ class Camera:
                     frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
                 return frame_bgr
             except Exception as e:
-                log(f"Erro ao ler frame: {e}. Tentando novamente...")
+                log(f"Erro ao ler frame (tentativa {attempt + 1}/3): {e}")
                 time.sleep(0.1)
         raise RuntimeError("Falha persistente na câmera.")
 
     def release(self) -> None:
         try:
             if self.picam is not None:
-                self.picam.stop()
+                try:
+                    self.picam.stop()
+                    log("Picamera2 liberada.")
+                except Exception as e:
+                    log(f"Erro ao parar Picamera2: {e}")
             if self.cap is not None:
-                self.cap.release()
-        except Exception:
-            pass
+                try:
+                    self.cap.release()
+                    log("Câmera USB liberada.")
+                except Exception as e:
+                    log(f"Erro ao liberar câmera USB: {e}")
+        except Exception as e:
+            log(f"Erro ao liberar câmera: {e}")
 
     def __enter__(self):
         return self
@@ -222,6 +250,8 @@ class LineFollowerController:
 class Robot:
     """Controla um robô seguidor de linha com visão computacional."""
     def __init__(self):
+        if HardwareControl is None or Vision is None:
+            raise RuntimeError("Módulos hardware_control ou vision não disponíveis.")
         config = CONFIG_DEFAULTS
         self.camera: Camera = Camera(**config["camera"])
         self.vision: Vision = Vision({}, log)
@@ -249,9 +279,13 @@ class Robot:
         SHARED_STATE.set("status", "stopped")
         try:
             self.hardware.stop()
-        except Exception:
-            pass
-        log("Parado.")
+            log("Motores parados.")
+        except Exception as e:
+            log(f"Erro ao parar motores: {e}")
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+            self.thread = None
+            log("Thread principal encerrada.")
 
     def _loop(self) -> None:
         target_fps = 30
@@ -261,49 +295,52 @@ class Robot:
                 start_time = time.time()
                 frame = self.camera.read()
                 bw = self._binarize(frame)
+                # usa visão para extrair centróide (assume função strip_centroid na Vision)
                 centroid, _ = self.vision.strip_centroid(bw, self.height - 50, 40)
                 left_speed, right_speed = self.controller.compute_speeds(centroid, self.width)
-                self.hardware.drive(left_speed, right_speed)
+                try:
+                    # drive pode lançar — proteja para não quebrar o loop inteiro
+                    self.hardware.drive(left_speed, right_speed)
+                except Exception as e:
+                    log(f"Erro ao enviar comandos aos motores: {e}")
                 SHARED_STATE.set("last_frame", frame)
-                SHARED_STATE.set("speeds", {
-                    "left": left_speed,
-                    "right": right_speed
-                })
+                SHARED_STATE.set("speeds", {"left": left_speed, "right": right_speed})
                 elapsed = time.time() - start_time
                 sleep_time = max(0, target_period - elapsed)
                 time.sleep(sleep_time)
-                SHARED_STATE.set("fps", 1.0 / (elapsed + sleep_time) if elapsed + sleep_time > 0 else 0)
+                SHARED_STATE.set("fps", 1.0 / (elapsed + sleep_time) if (elapsed + sleep_time) > 0 else 0)
         except Exception as e:
             log(f"Erro no loop principal: {e}")
         finally:
-            self.stop()
+            # não chame self.stop() aqui para evitar join recursivo quando o loop for disparado pela thread
+            try:
+                self.hardware.stop()
+            except Exception:
+                pass
 
     def _binarize(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Binariza a imagem para detecção de linha."""
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        kernel = np.ones((3, 3), np.uint8)
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel, iterations=1)
-        return bw
+        try:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            kernel = np.ones((3, 3), np.uint8)
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel, iterations=1)
+            return bw
+        except Exception as e:
+            log(f"Erro ao binarizar imagem: {e}")
+            raise
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
-        self.camera.release()
-
-
-def _wire_web(robot: Robot) -> None:
-    """Integra o robô com o servidor web, se disponível."""
-    if not WEB_AVAILABLE:
-        return
-    try:
-        if hasattr(web_stream, "register_robot"):
-            web_stream.register_robot(robot)
-            log("Robô registrado no servidor web.")
-    except Exception as e:
-        log(f"Falha ao integrar com web_stream: {e}")
+        try:
+            self.stop()
+        finally:
+            try:
+                self.camera.release()
+            except Exception:
+                pass
 
 
 def _setup_button(robot: Robot) -> None:
@@ -314,49 +351,52 @@ def _setup_button(robot: Robot) -> None:
     for pin in CANDIDATE_BUTTON_PINS:
         try:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            last_state = GPIO.HIGH
+            last_state = GPIO.input(pin)
             last_change = time.time()
 
             def _toggle(channel):
                 nonlocal last_state, last_change
-                current_state = GPIO.input(pin)
-                current_time = time.time()
-                if current_state == GPIO.LOW and last_state == GPIO.HIGH and (current_time - last_change) > 0.3:
-                    if robot.running:
-                        robot.stop()
-                    else:
-                        robot.start()
-                    last_change = current_time
-                last_state = current_state
+                try:
+                    current_state = GPIO.input(pin)
+                    current_time = time.time()
+                    if current_state == GPIO.LOW and last_state == GPIO.HIGH and (current_time - last_change) > 0.3:
+                        if robot.running:
+                            robot.stop()
+                        else:
+                            robot.start()
+                        last_change = current_time
+                    last_state = current_state
+                except Exception as e:
+                    log(f"Erro no callback do botão BCM {pin}: {e}")
 
-            GPIO.add_event_detect(pin, GPIO.BOTH, callback=_toggle)
+            # bouncetime para evitar múltiplas detecções
+            GPIO.add_event_detect(pin, GPIO.BOTH, callback=_toggle, bouncetime=300)
             log(f"Botão físico pronto no BCM {pin}.")
             break
         except Exception as e:
-            log(f"Falha botão BCM {pin}: {e}")
+            log(f"Falha ao configurar botão BCM {pin}: {e}")
 
 
 def main():
     """Função principal para executar o robô."""
-    with Robot() as robot:
-        _wire_web(robot)
-        _setup_button(robot)
-        if WEB_AVAILABLE and hasattr(web_stream, "app"):
-            host = os.environ.get("HOST", "0.0.0.0")
-            port = int(os.environ.get("PORT", "5000"))
+    try:
+        with Robot() as robot:
+            # _wire_web(robot)  # Comentar até que web_stream esteja disponível
+            _setup_button(robot)
+
+            # Inicia automaticamente para depuração (se você preferir só botão, remova esta linha)
+            robot.start()
+
             try:
-                if hasattr(web_stream, "socketio"):
-                    web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
-                else:
-                    web_stream.app.run(host=host, port=port)
-            finally:
-                robot.stop()
-        else:
-            try:
+                log("Loop principal (pressione Ctrl+C para sair).")
                 while True:
                     time.sleep(1.0)
             except KeyboardInterrupt:
+                log("Interrupção recebida.")
                 robot.stop()
+    except Exception as e:
+        log(f"Erro fatal na inicialização: {e}")
+        raise
 
 
 if __name__ == "__main__":
