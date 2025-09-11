@@ -165,7 +165,7 @@ class Robot:
     # tempos em segundos ao invés de ticks
     INTERSECT_FWD_TIME = 0.8
     TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 1.2
+    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
