@@ -217,7 +217,7 @@ class Robot:
         self.hardware.stop()
 
     def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = 120 if direction == "left" else -120
+        bias = -120 if direction == "left" else 120
         start_time = time.time()
         while self.running:
             if time.time() - start_time >= duration_s:
