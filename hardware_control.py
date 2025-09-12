@@ -116,7 +116,7 @@ class PIDController:
 class HardwareControl:
     """Open-loop robusto por padrão; encoders opcionais."""
     # Deadband & snap reto
-    MIN_DUTY = 55.0
+    MIN_DUTY = 40.0
     STRAIGHT_ERR_TH = 12.0
     STRAIGHT_MATCH_DELTA = 10.0
     STRAIGHT_MIN_DUTY = 50.0
