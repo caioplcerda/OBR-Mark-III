@@ -660,3 +660,61 @@ class Robot:
             avg_x = sum([p[0] for p in valids]) / len(valids)
             if avg_x < self.WIDTH*0.5:
                 return "left"
+            else:
+                return "right"
+        return "left"
+
+def _wire_web(robot: Robot):
+    if not WEB_AVAILABLE:
+        return
+    try:
+        if hasattr(web_stream, "register_robot"):
+            web_stream.register_robot(robot)
+            log("Robô registrado no servidor web.")
+    except Exception as e:
+        log(f"Falha ao integrar com web_stream: {e}")
+
+def _setup_button(robot: Robot):
+    if not GPIO_AVAILABLE:
+        log("GPIO indisponível: sem botão físico.")
+        return
+    for pin in [21, 4]:
+        try:
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            def _toggle(channel, _pin=pin):
+                if GPIO.input(_pin) == GPIO.LOW:
+                    if robot.running:
+                        robot.stop()
+                    else:
+                        robot.start()
+            GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle, bouncetime=300)
+            log(f"Botão físico pronto no BCM {pin}.")
+            break
+        except Exception as e:
+            log(f"Falha botão BCM {pin}: {e}")
+
+def main():
+    robot = Robot()
+    _wire_web(robot)
+    _setup_button(robot)
+
+    if WEB_AVAILABLE and hasattr(web_stream, "app"):
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "5000"))
+        try:
+            if hasattr(web_stream, "socketio"):
+                web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
+            else:
+                web_stream.app.run(host=host, port=port)
+        finally:
+            robot.stop()
+    else:
+        try:
+            robot.start()
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            robot.stop()
+
+if __name__ == "__main__":
+    main()
