@@ -1,6 +1,6 @@
-# vision.py
+# vision.py corrigido
 # Visão mínima para greens com calibração por clique e atualização de config.
-# NÃO importa main/hardware para evitar import circular.
+# Mais sensível e com logs detalhados.
 
 import cv2
 import numpy as np
@@ -9,12 +9,12 @@ class Vision:
     def __init__(self, config: dict, log_function=print):
         self.log = log_function if callable(log_function) else print
         self.cfg = {
-            "green_h_center": 60,   # centro do H (HSV) para verde
-            "green_h_tol": 25,      # tolerância no H
+            "green_h_center": 60,      # centro do H (HSV) para verde
+            "green_h_tol": 25,         # tolerância no H
             "green_s_min": 70,
             "green_v_min": 70,
-            "min_area": 400,        # área mínima do blob verde
-            "side_margin_frac": 0.10, # margem lateral para ignorar bordas
+            "min_area": 200,           # menor área mínima do blob verde (era 400)
+            "side_margin_frac": 0.10,  # margem lateral para ignorar bordas
         }
         if isinstance(config, dict):
             self.cfg.update(config)
@@ -43,7 +43,7 @@ class Vision:
             self.log(f"Vision: falha calibrate_by_click: {e}")
             return False
 
-    # ----- Greed detection -----
+    # ----- Green detection -----
     def detect_greens(self, frame_bgr):
         """
         Retorna (centroides, direção)
@@ -66,8 +66,8 @@ class Vision:
 
         mask = cv2.inRange(hsv, lower1, upper1)
 
-        # Considerar apenas a parte inferior do frame para evitar leituras precoces
-        roi_top = int(H * 0.6)
+        # Considerar apenas a metade inferior do frame (antes era 40%)
+        roi_top = int(H * 0.5)
         mask[:roi_top, :] = 0
 
         # Ignorar margens laterais
@@ -97,13 +97,12 @@ class Vision:
 
         direction = None
         if len(cents) >= 2:
-            # Dois verdes fortes -> UTURN
             direction = "uturn"
         elif len(cents) == 1:
             cx = cents[0][0]
-            if cx < W//2:
-                direction = "left"
-            else:
-                direction = "right"
+            direction = "left" if cx < W//2 else "right"
 
+        # Logs detalhados
+        if cents:
+            self.log(f"Vision: blobs verdes detectados = {len(cents)}, direção = {direction}")
         return cents, direction
