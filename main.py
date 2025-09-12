@@ -1,12 +1,20 @@
-# tiago 17:56
-# main.py corrigido - DETECÇÃO DE INTERSEÇÕES CORRIGIDA
-# Corrigida a lógica de detecção para distinguir adequadamente interseções de curvas 90°
+# main.py corrigido
+# Segue-linha robusto + UI web + botão físico (21/4).
+# Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
+# Interseções e C90 agora exigem mais frames (debounce maior).
+# Loops respeitam botão STOP sempre.
+# MELHORIA NA DETECÇÃO: Diferenciação melhor entre + (interseção reta larga) e C90 (curva com shift progressivo nos centróides).
+#   - Interseção: Largura média alta nas tiras inferiores + ângulo baixo (<15°).
+#   - Curva C90: Shift grande entre centróide superior e inferior (>80px) + ângulo alto (>20°).
+# Isso evita falsos positivos de curva em interseções retas, onde os centróides ficam alinhados apesar da largura.
 
 import os
 import cv2
 import time
+import json
 import threading
 import numpy as np
+import math
 from datetime import datetime
 from collections import deque
 
@@ -145,7 +153,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 30
+    BASE_SPEED = 10
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
@@ -158,13 +166,10 @@ class Robot:
     C90_DEBOUNCE = 6          # aumentado
     GREEN_DEBOUNCE = 2
 
-    # tempos base (servirão como timeouts máximos no novo método)
+    # tempos em segundos ao invés de ticks
     INTERSECT_FWD_TIME = 0.8
     TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 1.2  # tempo máximo aceitável para 90 (usado como timeout)
-
-    # bias de giro (reduzido para evitar giros bruscos)
-    TURN_BIAS = 100  # valor +/- para giro in-place
+    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
@@ -201,195 +206,29 @@ class Robot:
         log("Parado.")
 
     def _drive(self, base_speed: float, error: float):
-        # mesma compatibilidade que já tinha
         try:
-            if hasattr(self.hardware, "set_motor_speed"):
-                self.hardware.set_motor_speed(base_speed, error)
-            elif hasattr(self.hardware, "drive"):
-                left = int(base_speed - error)
-                right = int(base_speed + error)
-                self.hardware.drive(left, right)
-            elif hasattr(self.hardware, "set_motors"):
-                self.hardware.set_motors(base_speed, error)
-            else:
-                if hasattr(self.hardware, "write_pwm"):
-                    try:
-                        left = int(base_speed - error)
-                        right = int(base_speed + error)
-                        self.hardware.write_pwm(left_cmd=float(left), right_cmd=float(right))
-                    except Exception:
-                        pass
-        except Exception as e:
-            log(f"Falha ao enviar comando _drive: {e}")
+            self.hardware.set_motor_speed(base_speed, error)
+        except Exception:
+            pass
 
     def _forward_time(self, duration_s: float):
-        try:
-            if hasattr(self.hardware, "set_motor_speed"):
-                self.hardware.set_motor_speed(self.BASE_SPEED, 0)
-            elif hasattr(self.hardware, "drive"):
-                self.hardware.drive(self.BASE_SPEED, self.BASE_SPEED)
-            else:
-                try:
-                    self.hardware.set_motors(self.BASE_SPEED, self.BASE_SPEED)
-                except Exception:
-                    pass
-            start_time = time.time()
-            while self.running:
-                if time.time() - start_time >= duration_s:
-                    break
-                time.sleep(0.01)
-        finally:
-            try: self.hardware.stop()
-            except Exception: pass
+        self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+        start_time = time.time()
+        while self.running:
+            if time.time() - start_time >= duration_s:
+                break
+            time.sleep(0.01)
+        self.hardware.stop()
 
     def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = self.TURN_BIAS if direction == "left" else -self.TURN_BIAS
-        start = time.time()
-        try:
-            while self.running and (time.time() - start) < duration_s:
-                try:
-                    if hasattr(self.hardware, "set_motor_speed"):
-                        self.hardware.set_motor_speed(0, bias)
-                    elif hasattr(self.hardware, "drive"):
-                        l = int(-bias/2); r = int(bias/2)
-                        self.hardware.drive(l, r)
-                    elif hasattr(self.hardware, "set_motors"):
-                        self.hardware.set_motors(0, bias)
-                    elif hasattr(self.hardware, "write_pwm"):
-                        self.hardware.write_pwm(left_cmd=float(-bias), right_cmd=float(bias))
-                except Exception:
-                    pass
-                time.sleep(0.02)
-        finally:
-            try: self.hardware.stop()
-            except Exception: pass
-
-    def _turn_until_line(self, direction: str, timeout_s: float):
-        """
-        Gira em pequenos bursts até detectar a linha nos strips inferiores.
-        - direction: "left" ou "right"
-        - timeout_s: timeout máximo total
-        Retorna True se encontrou a linha, False se timeout.
-        """
-        if direction not in ("left", "right"):
-            direction = "left"
-        sign = 1 if direction == "left" else -1
-
-        base_bias = max(40, min(self.TURN_BIAS, 160))  # limites defensivos
-        step_time = 0.12            # tempo de cada burst (ajuste fino)
-        check_dt = 0.03             # intervalo de amostragem dentro do burst
-        max_steps = max(1, int(timeout_s / step_time))
-        found = False
+        bias = 120 if direction == "left" else -120
         start_time = time.time()
-
-        log(f"Iniciando giro incremental {direction} timeout={timeout_s:.2f}s steps={max_steps}")
-
-        try:
-            for step in range(max_steps):
-                # rampa suave: começa mais suave e aumenta se não encontrar
-                ramp = 0.5 + 0.5 * (step / max_steps)   # entre 0.5 e 1.0
-                bias = int(sign * base_bias * ramp)
-
-                # aplica o comando de giro por pequenos intervalos e verifica frame a cada check_dt
-                burst_start = time.time()
-                while (time.time() - burst_start) < step_time and (time.time() - start_time) < timeout_s and self.running:
-                    try:
-                        if hasattr(self.hardware, "set_motor_speed"):
-                            self.hardware.set_motor_speed(0, bias)
-                        elif hasattr(self.hardware, "drive"):
-                            l = int(-bias/2); r = int(bias/2)
-                            self.hardware.drive(l, r)
-                        elif hasattr(self.hardware, "set_motors"):
-                            self.hardware.set_motors(0, bias)
-                        elif hasattr(self.hardware, "write_pwm"):
-                            try:
-                                self.hardware.write_pwm(left_cmd=float(-bias), right_cmd=float(bias))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                    # pega frame e checa reaparição da linha nos 2 strips inferiores
-                    try:
-                        frame = self.camera.read()
-                        bw = self._binarize(frame)
-                        for k in range(2):   # verificar 2 strips inferiores
-                            y0 = self.STRIP_BOTTOM - k*self.STRIP_H
-                            c, w = self._strip_centroid(bw, y0, self.STRIP_H)
-                            if c is not None and w > 0:
-                                found = True
-                                log(f"Linha encontrada durante giro (step {step}, burst): strip={k} c={c} w={w}")
-                                break
-                        if found:
-                            break
-                    except Exception:
-                        # ignorar falha de frame e continuar
-                        pass
-
-                    time.sleep(check_dt)
-
-                if found or (time.time() - start_time) >= timeout_s or not self.running:
-                    break
-
-            # se não encontrou, tenta um pequeno movimento compensatório no sentido oposto (anti-stuck)
-            if not found and self.running:
-                log("Não encontrou linha: tentativa rápida oposta (anti-stuck)")
-                # curto burst oposto
-                opp_sign = -sign
-                opp_bias = int(opp_sign * base_bias * 0.6)
-                try:
-                    opp_start = time.time()
-                    while time.time() - opp_start < 0.4 and self.running:
-                        try:
-                            if hasattr(self.hardware, "set_motor_speed"):
-                                self.hardware.set_motor_speed(0, opp_bias)
-                            elif hasattr(self.hardware, "drive"):
-                                l = int(-opp_bias/2); r = int(opp_bias/2)
-                                self.hardware.drive(l, r)
-                            elif hasattr(self.hardware, "set_motors"):
-                                self.hardware.set_motors(0, opp_bias)
-                        except Exception:
-                            pass
-                        try:
-                            frame = self.camera.read()
-                            bw = self._binarize(frame)
-                            for k in range(2):
-                                y0 = self.STRIP_BOTTOM - k*self.STRIP_H
-                                c, w = self._strip_centroid(bw, y0, self.STRIP_H)
-                                if c is not None and w > 0:
-                                    found = True
-                                    log(f"Linha encontrada durante anti-stuck oposto: strip={k} c={c} w={w}")
-                                    break
-                            if found:
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(check_dt)
-                finally:
-                    try: self.hardware.stop()
-                    except Exception: pass
-
-        finally:
-            try: self.hardware.stop()
-            except Exception: pass
-
-        if found:
-            # dá um pequeno avanço para estabilizar sobre a linha (reduz overshoot no retorno ao loop)
-            try:
-                log("Avançando um pouco para estabilizar após encontrar a linha")
-                if hasattr(self.hardware, "set_motor_speed"):
-                    self.hardware.set_motor_speed(int(self.BASE_SPEED*0.6), 0)
-                elif hasattr(self.hardware, "drive"):
-                    self.hardware.drive(int(self.BASE_SPEED*0.6), int(self.BASE_SPEED*0.6))
-                time.sleep(0.12)
-            except Exception:
-                pass
-            try: self.hardware.stop()
-            except Exception: pass
-            return True
-
-        log("Timeout sem encontrar linha no giro incremental.")
-        return False
+        while self.running:
+            if time.time() - start_time >= duration_s:
+                break
+            self.hardware.set_motor_speed(0, bias)
+            time.sleep(0.01)
+        self.hardware.stop()
 
     def _loop(self):
         try:
@@ -407,7 +246,7 @@ class Robot:
                 valids = [p for p in cents if p is not None]
                 angle = self._fit_angle(valids)
 
-                is_intersection, is_curve90, curve_dir = self._detect_intersection_and_curves(bw, widths, cents, angle)
+                is_intersection, is_curve90, _ = self._detect_intersection(bw, widths, cents, angle)
 
                 if is_curve90:
                     self._c90_seen += 1
@@ -421,8 +260,7 @@ class Robot:
                     self._intersect_seen = 0
                 confirmed_intersection = self._intersect_seen >= self.INTERSECT_DEBOUNCE
 
-                # DETECÇÃO DE VERDE (usa Vision.detect_greens se existir; fallback interno caso contrário)
-                green_centroids, green_dir = self._detect_greens(frame)
+                green_centroids, green_dir = self.vision.detect_greens(frame)
                 if green_dir:
                     self._green_last = green_dir
                     self._green_seen += 1
@@ -430,76 +268,31 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # Prioridade: curvas 90 confirmadas
-                if confirmed_curve90:
-                    dir_to_turn = curve_dir or confirmed_green or self._infer_curve_direction(valids, angle)
-                    log(f"Curva 90° confirmada -> direção: {dir_to_turn}")
-                    # anda um pouco e gira até encontrar linha (timeout = TURN90_TURN_TIME)
-                    self._forward_time(self.TURN90_FWD_TIME)
-                    found = self._turn_until_line(dir_to_turn, timeout_s=self.TURN90_TURN_TIME)
-                    if not found:
-                        # fallback: girar por tempo reduzido (evita 180°)
-                        fallback_time = min(self.TURN90_TURN_TIME, 0.9)
-                        log(f"Fallback: girar por tempo fixo {fallback_time:.2f}s")
-                        self._turn_in_place_time(direction=dir_to_turn, duration_s=fallback_time)
-                    self._c90_seen = 0
-                    self._green_seen = 0
-                    self._intersect_seen = 0
-                    self._green_last = None
-                    continue
-
-                # Interseções
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
-                        log("Interseção com sinal verde (UTURN) detectada -> executando U-turn")
                         self._forward_time(self.INTERSECT_FWD_TIME)
-                        # U-turn: tenta girar até achar linha duas vezes, timeout maior
-                        found = self._turn_until_line("left", timeout_s=self.TURN90_TURN_TIME * 3)
-                        if not found:
-                            # se não achou, fallback para tempo (maior)
-                            self._turn_in_place_time("left", duration_s=self.TURN90_TURN_TIME * 2)
+                        self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
                         self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         continue
                     elif confirmed_green in ("left", "right"):
-                        log(f"Interseção com sinal verde ({confirmed_green}) -> executando curva")
                         self._forward_time(self.TURN90_FWD_TIME)
-                        found = self._turn_until_line(confirmed_green, timeout_s=self.TURN90_TURN_TIME)
-                        if not found:
-                            # fallback curto
-                            self._turn_in_place_time(confirmed_green, duration_s=min(self.TURN90_TURN_TIME, 0.9))
+                        self._turn_in_place_time(confirmed_green, self.TURN90_TURN_TIME)
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
                     else:
-                        log("Interseção (sem verde) -> forçando ir reto")
-                        try:
-                            if hasattr(self.hardware, "drive"):
-                                self.hardware.drive(self.BASE_SPEED, self.BASE_SPEED)
-                            else:
-                                self.hardware.set_motor_speed(self.BASE_SPEED, 0)
-                            time.sleep(self.INTERSECT_FWD_TIME + 0.3)
-                        finally:
-                            try: self.hardware.stop()
-                            except Exception: pass
+                        self._forward_time(self.INTERSECT_FWD_TIME)
                         self._intersect_seen = 0
                         continue
 
-                # Seguir linha normal
                 if valids:
                     offset = valids[0][0] - (self.WIDTH // 2)
                     error = float(offset) + self.MIX_ANGLE * float(angle)
                     self._drive(self.BASE_SPEED, error)
                 else:
-                    log("Linha perdida: parando e esperando (ou implementar busca mais avançada)")
-                    try:
-                        self.hardware.stop()
-                    except Exception:
-                        pass
+                    self.hardware.stop()
 
-                # atualiza estado para UI
-                left_spd = getattr(self.hardware, "last_left_speed", 0)
-                right_spd = getattr(self.hardware, "last_right_speed", 0)
                 SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["speeds"] = {"left": left_spd, "right": right_spd}
+                SHARED_STATE["speeds"] = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
                 time.sleep(0.01)
         except Exception as e:
             log(f"Erro no loop principal: {e}")
@@ -507,74 +300,7 @@ class Robot:
             try: self.hardware.stop()
             except Exception: pass
 
-    # ==== MÉTODO CORRIGIDO PARA DISTINGUIR INTERSEÇÕES DE CURVAS 90° ====
-    def _detect_intersection_and_curves(self, bw, widths, cents, angle_deg):
-        """
-        Detecta interseções e curvas de 90° separadamente.
-        
-        Returns:
-            is_intersection (bool): True se é uma interseção (cruzamento em T ou +)
-            is_curve90 (bool): True se é uma curva fechada de 90°
-            curve_dir (str): direção sugerida para curva ("left", "right" ou None)
-        """
-        # Indicadores básicos
-        total_width = sum(widths)
-        valid_strips = len([w for w in widths if w > 0])
-        wide_strips = sum(widths[:2])  # soma dos 2 primeiros strips (mais próximos)
-        
-        # Análise do ângulo
-        high_angle = abs(angle_deg) > 35
-        moderate_angle = 15 < abs(angle_deg) <= 35
-        
-        # Análise da posição da linha
-        valids = [p for p in cents if p is not None]
-        curve_dir = None
-        line_position = "center"
-        
-        if valids:
-            xs = [p[0] for p in valids]
-            avg_x = sum(xs) / len(xs)
-            if avg_x < self.WIDTH * 0.3:      # ajustado de 0.25 para ser menos sensível
-                curve_dir = "left"
-                line_position = "left"
-            elif avg_x > self.WIDTH * 0.7:   # ajustado de 0.75 para ser menos sensível
-                curve_dir = "right"
-                line_position = "right"
-                
-        # CRITÉRIOS PARA INTERSEÇÃO:
-        # 1. Linha muito larga nos strips superiores (indica cruzamento)
-        # 2. Múltiplos strips com boa largura
-        # 3. Ângulo não muito extremo (linha continua relativamente reta)
-        is_intersection = (
-            wide_strips > 350 and           # linha muito larga à frente
-            valid_strips >= 3 and          # múltiplos strips detectados
-            total_width > 400 and          # largura total significativa
-            not high_angle                 # ângulo não muito extremo
-        )
-        
-        # CRITÉRIOS PARA CURVA 90°:
-        # 1. Ângulo muito alto OU linha desaparecendo com posição lateral
-        # 2. Poucos strips válidos (linha sumindo)
-        # 3. Largura total baixa (linha se estreitando/sumindo)
-        line_disappearing = total_width < 150 and valid_strips < 3
-        
-        is_curve90 = (
-            high_angle or                                    # ângulo muito alto
-            (moderate_angle and line_position != "center") or  # ângulo médio + posição lateral
-            (line_disappearing and curve_dir is not None)     # linha sumindo + posição definida
-        )
-        
-        # Se ângulo alto mas sem direção definida, infere pela direção do ângulo
-        if high_angle and curve_dir is None:
-            curve_dir = "left" if angle_deg < 0 else "right"
-            
-        # Log para debug
-        log(f"Detecção: wide_strips={wide_strips}, total_width={total_width}, valid_strips={valid_strips}, "
-            f"angle={angle_deg:.1f}, pos={line_position} -> intersect={is_intersection}, curve90={is_curve90}, dir={curve_dir}")
-        
-        return is_intersection, is_curve90, curve_dir
-
-    # ==== visão utilitários (mantidos) ====
+    # ==== visão utilitários (mesmos do original) ====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
@@ -586,8 +312,7 @@ class Robot:
         y1 = max(0, min(H, int(y0 + h)))
         roi = bw[y0:y1, :]
         colsum = roi.sum(axis=0)
-        threshold = 255 * h * 0.03
-        if colsum.max() < threshold:
+        if colsum.max() < 255 * h * 0.05:
             return None, 0
         x = np.arange(0, W, dtype=np.float32)
         cx = float((x * colsum).sum() / (colsum.sum() + 1e-6))
@@ -604,65 +329,28 @@ class Robot:
         angle_deg = np.degrees(np.arctan2(alpha, 1.0))
         return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
 
-    def _detect_greens(self, frame):
-        try:
-            if hasattr(self.vision, "detect_greens"):
-                out = self.vision.detect_greens(frame)
-                if isinstance(out, tuple) and len(out) >= 2:
-                    return out[0], out[1]
-                elif isinstance(out, str) or out is None:
-                    return [], out
-        except Exception as e:
-            log(f"vision.detect_greens falhou: {e}")
+    def _detect_intersection(self, bw, widths, cents, angle_deg):
+        # Largura média das 3 tiras inferiores (próximas ao robô)
+        bottom_widths = [w for w in widths[:3] if w > 0]
+        is_wide = len(bottom_widths) > 0 and np.mean(bottom_widths) > 250  # Ajuste threshold se necessário (era 300 para soma de 2)
 
-        try:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            lower_green = np.array([40, 60, 40])
-            upper_green = np.array([85, 255, 255])
-            mask = cv2.inRange(hsv, lower_green, upper_green)
-            kernel = np.ones((5, 5), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            centroids = []
-            if not contours:
-                return [], None
-            areas = [cv2.contourArea(c) for c in contours]
-            max_idx = int(np.argmax(areas))
-            c = contours[max_idx]
-            area = areas[max_idx]
-            M = cv2.moments(c)
-            if M.get("m00", 0) <= 0:
-                return [], None
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            centroids.append((cx, cy, area))
-            H, W = frame.shape[:2]
-            area_ratio = float(area) / float(W * H)
-            if area_ratio > 0.06:
-                direction = "uturn"
-            elif cx < W * 0.35:
-                direction = "left"
-            elif cx > W * 0.65:
-                direction = "right"
-            else:
-                direction = None
-            log(f"Detect_greens fallback: cx={cx} cy={cy} area={area} ratio={area_ratio:.4f} dir={direction}")
-            return centroids, direction
-        except Exception as e:
-            log(f"Erro no fallback de detect_greens: {e}")
-            return [], None
+        # Interseção (+): larga nas inferiores E ângulo baixo (reta alinhada)
+        is_intersection = is_wide and abs(angle_deg) < 15  # Threshold baixo para garantir alinhamento
 
-    def _infer_curve_direction(self, valids, angle):
-        if angle is not None and abs(angle) > 10:
-            return "left" if angle < 0 else "right"
-        if valids:
-            avg_x = sum([p[0] for p in valids]) / len(valids)
-            if avg_x < self.WIDTH*0.5:
-                return "left"
-            else:
-                return "right"
-        return "left"
+        # Curva C90: shift grande entre centróide superior (cima da imagem) e inferior (baixo) + ângulo alto
+        # cents[0]: tira inferior (baixo da imagem), cents[-1]: tira superior (cima da imagem)
+        num_valid_cents = sum(1 for c in cents if c is not None)
+        is_curve90 = False
+        if num_valid_cents >= 3:
+            bottom_cx = cents[0][0] if cents[0] is not None else self.WIDTH // 2
+            top_cx = cents[-1][0] if cents[-1] is not None else self.WIDTH // 2
+            shift_px = abs(bottom_cx - top_cx)
+            is_curve90 = (shift_px > 80) and (abs(angle_deg) > 20)  # Shift progressivo indica curva; tune se necessário
+        elif num_valid_cents >= 2:
+            # Fallback: só ângulo se poucas tiras válidas
+            is_curve90 = abs(angle_deg) > 25
+
+        return is_intersection, is_curve90, False  # Terceiro valor reservado (ex: para T-junctions futuras)
 
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
@@ -681,8 +369,8 @@ def _setup_button(robot: Robot):
     for pin in [21, 4]:
         try:
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            def _toggle(channel, _pin=pin):
-                if GPIO.input(_pin) == GPIO.LOW:
+            def _toggle(channel):
+                if GPIO.input(pin) == GPIO.LOW:
                     if robot.running:
                         robot.stop()
                     else:
@@ -710,7 +398,6 @@ def main():
             robot.stop()
     else:
         try:
-            robot.start()
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
