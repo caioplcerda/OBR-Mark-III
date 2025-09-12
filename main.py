@@ -1,3 +1,4 @@
+# tiago 17:56
 # main.py corrigido (giro incremental substituído para evitar overshoot 180°)
 # Substitui _turn_until_line por uma versão incremental em bursts.
 
@@ -144,7 +145,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 26  # 21 / 0.8 = 26.25 ≈ 26
+    BASE_SPEED = 30
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
@@ -152,18 +153,18 @@ class Robot:
     STRIP_H = 28
     STRIP_BOTTOM = 440
 
-    INTERSECT_DEBOUNCE = 8   # increased for more stability
+    INTERSECT_DEBOUNCE = 6   # aumentado
     INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 10         # increased significantly to reduce false curve detection
-    GREEN_DEBOUNCE = 3        # increased slightly
+    C90_DEBOUNCE = 6          # aumentado
+    GREEN_DEBOUNCE = 2
 
     # tempos base (servirão como timeouts máximos no novo método)
-    INTERSECT_FWD_TIME = 0.7   # 0.56 / 0.8 = 0.7
-    TURN90_FWD_TIME = 0.525    # 0.42 / 0.8 = 0.525
-    TURN90_TURN_TIME = 1.05    # 0.84 / 0.8 = 1.05
+    INTERSECT_FWD_TIME = 0.8
+    TURN90_FWD_TIME = 0.4
+    TURN90_TURN_TIME = 1.2  # tempo máximo aceitável para 90 (usado como timeout)
 
     # bias de giro (reduzido para evitar giros bruscos)
-    TURN_BIAS = 88   # 70 / 0.8 = 87.5 ≈ 88
+    TURN_BIAS = 100  # valor +/- para giro in-place
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
@@ -429,8 +430,8 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
-                # Prioridade: curvas 90 confirmadas (mas só se não for interseção)
-                if confirmed_curve90 and not confirmed_intersection:
+                # Prioridade: curvas 90 confirmadas
+                if confirmed_curve90:
                     dir_to_turn = curve_dir or confirmed_green or self._infer_curve_direction(valids, angle)
                     log(f"Curva 90° confirmada -> direção: {dir_to_turn}")
                     # anda um pouco e gira até encontrar linha (timeout = TURN90_TURN_TIME)
@@ -447,25 +448,18 @@ class Robot:
                     self._green_last = None
                     continue
 
-                # Interseções (prioridade sobre curvas 90)
-                if confirmed_intersection:
+                # Interseções
+                if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
-                        # Additional safety: only do U-turn if we've seen the signal for multiple frames
-                        if self._green_seen >= 4:  # Require more confirmation for U-turns
-                            log("Interseção com sinal verde (UTURN) detectada -> executando U-turn")
-                            self._forward_time(self.INTERSECT_FWD_TIME)
-                            # U-turn: tenta girar até achar linha duas vezes, timeout maior
-                            found = self._turn_until_line("left", timeout_s=self.TURN90_TURN_TIME * 3)
-                            if not found:
-                                # se não achou, fallback para tempo (maior)
-                                self._turn_in_place_time("left", duration_s=self.TURN90_TURN_TIME * 2)
-                            self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
-                            continue
-                        else:
-                            log("Sinal verde U-turn detectado mas insuficiente confirmação - seguindo em frente")
-                            self._forward_time(self.INTERSECT_FWD_TIME)
-                            self._intersect_seen = 0
-                            continue
+                        log("Interseção com sinal verde (UTURN) detectada -> executando U-turn")
+                        self._forward_time(self.INTERSECT_FWD_TIME)
+                        # U-turn: tenta girar até achar linha duas vezes, timeout maior
+                        found = self._turn_until_line("left", timeout_s=self.TURN90_TURN_TIME * 3)
+                        if not found:
+                            # se não achou, fallback para tempo (maior)
+                            self._turn_in_place_time("left", duration_s=self.TURN90_TURN_TIME * 2)
+                        self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
+                        continue
                     elif confirmed_green in ("left", "right"):
                         log(f"Interseção com sinal verde ({confirmed_green}) -> executando curva")
                         self._forward_time(self.TURN90_FWD_TIME)
@@ -549,11 +543,7 @@ class Robot:
                 curve_dir = "right"
         total_width = sum(widths)
         disappearance = total_width < 50 and len([w for w in widths if w > 0]) < 2
-        
-        # Only detect curve90 if there's very clear evidence of a curve
-        # At intersections, we need strong evidence to avoid false curve detection
-        is_curve90 = (curve_dir is not None and disappearance and abs(angle_deg) > 15) or (disappearance and abs(angle_deg) > 30)
-        
+        is_curve90 = ang_high or (curve_dir is not None and disappearance) or (disappearance and abs(angle_deg) > 20)
         if ang_high and curve_dir is None:
             curve_dir = "left" if angle_deg < 0 else "right"
         return wide, is_curve90, curve_dir
@@ -593,8 +583,7 @@ class Robot:
             centroids.append((cx, cy, area))
             H, W = frame.shape[:2]
             area_ratio = float(area) / float(W * H)
-            # More conservative U-turn detection - only for very large green areas
-            if area_ratio > 0.12:  # Increased threshold from 0.06 to 0.12
+            if area_ratio > 0.06:
                 direction = "uturn"
             elif cx < W * 0.35:
                 direction = "left"
@@ -673,3 +662,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
