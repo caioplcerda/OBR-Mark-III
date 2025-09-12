@@ -534,10 +534,10 @@ class Robot:
         if valids:
             xs = [p[0] for p in valids]
             avg_x = sum(xs) / len(xs)
-            if avg_x < self.WIDTH * 0.25:
+            if avg_x < self.WIDTH * 0.3:      # ajustado de 0.25 para ser menos sensível
                 curve_dir = "left"
                 line_position = "left"
-            elif avg_x > self.WIDTH * 0.75:
+            elif avg_x > self.WIDTH * 0.7:   # ajustado de 0.75 para ser menos sensível
                 curve_dir = "right"
                 line_position = "right"
                 
