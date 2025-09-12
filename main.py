@@ -148,7 +148,7 @@ class Robot:
     WIDTH = 640
     HEIGHT = 480
 
-    BASE_SPEED = 45
+    BASE_SPEED = 55
     MIX_ANGLE = 0.7
     MAX_ANGLE = 50.0
 
