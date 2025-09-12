@@ -158,7 +158,7 @@ class Robot:
 
     INTERSECT_DEBOUNCE = 6
     C90_DEBOUNCE = 6
-    GREEN_DEBOUNCE = 2
+    GREEN_DEBOUNCE = 4
 
     # tempos calibráveis
     INTERSECT_FWD_TIME = 0.8
@@ -331,7 +331,7 @@ class Robot:
 
     def _detect_intersection(self, bw, widths, cents, angle_deg):
         bottom_widths = [w for w in widths[:3] if w > 0]
-        is_wide = len(bottom_widths) > 0 and np.mean(bottom_widths) > 250
+        is_wide = len(bottom_widths) > 0 and np.mean(bottom_widths) > 300
         is_intersection = is_wide and abs(angle_deg) < 15
 
         num_valid_cents = sum(1 for c in cents if c is not None)
