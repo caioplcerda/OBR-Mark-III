@@ -1,4 +1,4 @@
-# tiago 17:56
+# tiago 17:56 1AJ
 # main.py corrigido (giro incremental substituído para evitar overshoot 180°)
 # Substitui _turn_until_line por uma versão incremental em bursts.
 
@@ -480,8 +480,8 @@ class Robot:
                         finally:
                             try: self.hardware.stop()
                             except Exception: pass
-                                self._intersect_seen = 0
-                            continue
+                        self._intersect_seen = 0
+                        continue
                 if valids:
                     offset = valids[0][0] - (self.WIDTH // 2)
                     error = float(offset) + self.MIX_ANGLE * float(angle)
@@ -668,5 +668,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
