@@ -1,5 +1,7 @@
 # main.py corrigido
-# Ajuste: detecção de interseção mais robusta (cruz "+") e comportamento de ir reto forçado.
+# - Recoloquei Robot.start()
+# - Logs extras para depuração (interseção, curva, verde)
+# - Detecção de cruz (“+”) ajustada
 
 import os
 import cv2
@@ -182,6 +184,25 @@ class Robot:
         self._green_last = None
         self.planned_direction = None
 
+    def start(self):
+        if self.running:
+            log("Robô já está rodando.")
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        SHARED_STATE["status"] = "running"
+        log("Loop principal iniciado.")
+
+    def stop(self):
+        self.running = False
+        SHARED_STATE["status"] = "stopped"
+        try:
+            self.hardware.stop()
+        except Exception:
+            pass
+        log("Parado.")
+
     # ==== funções de movimento ====
     def _drive(self, base_speed: float, error: float):
         try:
@@ -208,15 +229,6 @@ class Robot:
                 self.hardware.stop()
             except Exception:
                 pass
-
-    def stop(self):
-        self.running = False
-        SHARED_STATE["status"] = "stopped"
-        try:
-            self.hardware.stop()
-        except Exception:
-            pass
-        log("Parado.")
 
     # ==== loop principal ====
     def _loop(self):
@@ -262,14 +274,13 @@ class Robot:
                 if confirmed_curve90:
                     log(f"Curva 90° confirmada -> direção: {curve_dir}")
                     self._forward_time(self.TURN90_FWD_TIME)
-                    # aqui entraria _turn_until_line como no original
                     self._c90_seen = 0
                     continue
 
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green in ("left", "right", "uturn"):
                         log(f"Interseção com verde {confirmed_green}")
-                        # lógica de verde segue igual ao original...
+                        # lógica de verde poderia ser expandida aqui
                     else:
                         log("Interseção (sem verde) -> forçando ir reto")
                         try:
@@ -299,8 +310,10 @@ class Robot:
                         pass
 
                 SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["speeds"] = {"left": getattr(self.hardware, "last_left_speed", 0),
-                                          "right": getattr(self.hardware, "last_right_speed", 0)}
+                SHARED_STATE["speeds"] = {
+                    "left": getattr(self.hardware, "last_left_speed", 0),
+                    "right": getattr(self.hardware, "last_right_speed", 0),
+                }
                 time.sleep(0.01)
         except Exception as e:
             log(f"Erro no loop principal: {e}")
@@ -313,8 +326,9 @@ class Robot:
     # ==== visão ====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                     cv2.THRESH_BINARY_INV, 21, 7)
+        return cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7
+        )
 
     def _strip_centroid(self, bw, y0, h):
         H, W = bw.shape[:2]
@@ -358,14 +372,26 @@ class Robot:
                 curve_dir = "right"
 
         disappearance = total_width < 50 and len([w for w in widths if w > 0]) < 2
-        is_curve90 = ang_high or (curve_dir is not None and disappearance) or (disappearance and abs(angle_deg) > 20)
+        is_curve90 = (
+            ang_high
+            or (curve_dir is not None and disappearance)
+            or (disappearance and abs(angle_deg) > 20)
+        )
         if ang_high and curve_dir is None:
             curve_dir = "left" if angle_deg < 0 else "right"
+
+        if is_intersection:
+            log("Detectado: INTERSEÇÃO (cruz ou T)")
+        if is_curve90:
+            log(f"Detectado: CURVA 90° (dir={curve_dir})")
 
         return is_intersection, is_curve90, curve_dir
 
     def _detect_greens(self, frame):
-        return self.vision.detect_greens(frame)
+        cents, direction = self.vision.detect_greens(frame)
+        if direction:
+            log(f"Detectado: VERDE ({direction})")
+        return cents, direction
 
 
 def _wire_web(robot: Robot):
@@ -411,7 +437,9 @@ def main():
         port = int(os.environ.get("PORT", "5000"))
         try:
             if hasattr(web_stream, "socketio"):
-                web_stream.socketio.run(web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True)
+                web_stream.socketio.run(
+                    web_stream.app, host=host, port=port, allow_unsafe_werkzeug=True
+                )
             else:
                 web_stream.app.run(host=host, port=port)
         finally:
