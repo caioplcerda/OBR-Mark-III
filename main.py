@@ -469,11 +469,21 @@ class Robot:
                             self._turn_in_place_time(confirmed_green, duration_s=min(self.TURN90_TURN_TIME, 0.9))
                         self._green_seen = 0; self._intersect_seen = 0
                         continue
-                    else:
-                        log("Interseção (sem verde) -> seguir em frente por pequeno tempo")
-                        self._forward_time(self.INTERSECT_FWD_TIME)
-                        self._intersect_seen = 0
-                        continue
+else:
+    log("Interseção (sem verde) -> forçando ir reto")
+    # anda reto um pouco mais que o normal, ignorando correção lateral
+    try:
+        if hasattr(self.hardware, "drive"):
+            self.hardware.drive(self.BASE_SPEED, self.BASE_SPEED)
+        else:
+            self.hardware.set_motor_speed(self.BASE_SPEED, 0)
+        time.sleep(self.INTERSECT_FWD_TIME + 0.3)  # avança mais
+    finally:
+        try: self.hardware.stop()
+        except Exception: pass
+    self._intersect_seen = 0
+    continue
+
 
                 # Seguimento normal
                 if valids:
