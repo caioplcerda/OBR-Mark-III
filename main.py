@@ -1,12 +1,9 @@
 # main.py corrigido
-# Segue-linha robusto + UI web + botão físico (21/4).
-# Ajustado para usar TEMPO ao invés de ticks nos movimentos (forward e turn).
-# Interseções e C90 agora exigem mais frames (debounce maior).
-# Loops respeitam botão STOP sempre.
-# MELHORIA NA DETECÇÃO: Diferenciação melhor entre + (interseção reta larga) e C90 (curva com shift progressivo nos centróides).
-#   - Interseção: Largura média alta nas tiras inferiores + ângulo baixo (<15°).
-#   - Curva C90: Shift grande entre centróide superior e inferior (>80px) + ângulo alto (>20°).
-# Isso evita falsos positivos de curva em interseções retas, onde os centróides ficam alinhados apesar da largura.
+# Segue-linha robusto + UI web + botão físico.
+# Ajustes:
+#  - Logs claros para detecção de verde
+#  - Tempos de curva fáceis de calibrar
+#  - Giro menos brusco (bias reduzido)
 
 import os
 import cv2
@@ -50,8 +47,6 @@ try:
         GPIO_AVAILABLE = False
 except Exception:
     GPIO_AVAILABLE = False
-
-CANDIDATE_BUTTON_PINS = [21, 4]
 
 from hardware_control import HardwareControl
 from vision import Vision
@@ -161,15 +156,14 @@ class Robot:
     STRIP_H = 28
     STRIP_BOTTOM = 440
 
-    INTERSECT_DEBOUNCE = 6   # aumentado
-    INTERSECT_AHEAD_DEBOUNCE = 4
-    C90_DEBOUNCE = 6          # aumentado
+    INTERSECT_DEBOUNCE = 6
+    C90_DEBOUNCE = 6
     GREEN_DEBOUNCE = 2
 
-    # tempos em segundos ao invés de ticks
+    # tempos calibráveis
     INTERSECT_FWD_TIME = 0.8
     TURN90_FWD_TIME = 0.4
-    TURN90_TURN_TIME = 0.9  # reduzido de 1.2 para 0.9 para menor giro em curvas C90
+    TURN90_TURN_TIME = 0.85   # ajustável (era 0.9)
 
     PID_DEFAULTS = {"kp": 0.6, "ki": 0.0, "kd": 0.1, "sample_time": 0.02}
 
@@ -186,7 +180,6 @@ class Robot:
         self._c90_seen = 0
         self._green_seen = 0
         self._green_last = None
-        self.planned_direction = None
 
     def start(self):
         if self.running:
@@ -214,18 +207,14 @@ class Robot:
     def _forward_time(self, duration_s: float):
         self.hardware.set_motor_speed(self.BASE_SPEED, 0)
         start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
+        while self.running and time.time() - start_time < duration_s:
             time.sleep(0.01)
         self.hardware.stop()
 
     def _turn_in_place_time(self, direction: str, duration_s: float):
-        bias = 120 if direction == "left" else -120
+        bias = 100 if direction == "left" else -100  # menos agressivo
         start_time = time.time()
-        while self.running:
-            if time.time() - start_time >= duration_s:
-                break
+        while self.running and time.time() - start_time < duration_s:
             self.hardware.set_motor_speed(0, bias)
             time.sleep(0.01)
         self.hardware.stop()
@@ -268,19 +257,26 @@ class Robot:
                     self._green_seen = 0
                 confirmed_green = self._green_last if self._green_seen >= self.GREEN_DEBOUNCE else None
 
+                # logs
+                if confirmed_green:
+                    log(f"Marcador verde confirmado: {confirmed_green}")
+
                 if confirmed_intersection and not confirmed_curve90:
                     if confirmed_green == "uturn":
                         self._forward_time(self.INTERSECT_FWD_TIME)
                         self._turn_in_place_time("left", self.TURN90_TURN_TIME * 2)
+                        log("Execução: U-Turn à esquerda")
                         self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         continue
                     elif confirmed_green in ("left", "right"):
                         self._forward_time(self.TURN90_FWD_TIME)
                         self._turn_in_place_time(confirmed_green, self.TURN90_TURN_TIME)
-                        self._green_seen = 0; self._intersect_seen = 0
+                        log(f"Execução: curva {confirmed_green}")
+                        self._green_seen = 0; self._intersect_seen = 0; self._green_last = None
                         continue
                     else:
                         self._forward_time(self.INTERSECT_FWD_TIME)
+                        log("Execução: interseção sem verde → reto")
                         self._intersect_seen = 0
                         continue
 
@@ -292,7 +288,10 @@ class Robot:
                     self.hardware.stop()
 
                 SHARED_STATE["last_frame"] = frame
-                SHARED_STATE["speeds"] = {"left": self.hardware.last_left_speed, "right": self.hardware.last_right_speed}
+                SHARED_STATE["speeds"] = {
+                    "left": self.hardware.last_left_speed,
+                    "right": self.hardware.last_right_speed
+                }
                 time.sleep(0.01)
         except Exception as e:
             log(f"Erro no loop principal: {e}")
@@ -300,10 +299,11 @@ class Robot:
             try: self.hardware.stop()
             except Exception: pass
 
-    # ==== visão utilitários (mesmos do original) ====
+    # ==== visão utilitários ====
     def _binarize(self, frame_bgr):
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 21, 7)
+        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                   cv2.THRESH_BINARY_INV, 21, 7)
         return bw
 
     def _strip_centroid(self, bw, y0, h):
@@ -330,27 +330,21 @@ class Robot:
         return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
 
     def _detect_intersection(self, bw, widths, cents, angle_deg):
-        # Largura média das 3 tiras inferiores (próximas ao robô)
         bottom_widths = [w for w in widths[:3] if w > 0]
-        is_wide = len(bottom_widths) > 0 and np.mean(bottom_widths) > 250  # Ajuste threshold se necessário (era 300 para soma de 2)
+        is_wide = len(bottom_widths) > 0 and np.mean(bottom_widths) > 250
+        is_intersection = is_wide and abs(angle_deg) < 15
 
-        # Interseção (+): larga nas inferiores E ângulo baixo (reta alinhada)
-        is_intersection = is_wide and abs(angle_deg) < 15  # Threshold baixo para garantir alinhamento
-
-        # Curva C90: shift grande entre centróide superior (cima da imagem) e inferior (baixo) + ângulo alto
-        # cents[0]: tira inferior (baixo da imagem), cents[-1]: tira superior (cima da imagem)
         num_valid_cents = sum(1 for c in cents if c is not None)
         is_curve90 = False
         if num_valid_cents >= 3:
             bottom_cx = cents[0][0] if cents[0] is not None else self.WIDTH // 2
             top_cx = cents[-1][0] if cents[-1] is not None else self.WIDTH // 2
             shift_px = abs(bottom_cx - top_cx)
-            is_curve90 = (shift_px > 80) and (abs(angle_deg) > 20)  # Shift progressivo indica curva; tune se necessário
+            is_curve90 = (shift_px > 80) and (abs(angle_deg) > 20)
         elif num_valid_cents >= 2:
-            # Fallback: só ângulo se poucas tiras válidas
             is_curve90 = abs(angle_deg) > 25
 
-        return is_intersection, is_curve90, False  # Terceiro valor reservado (ex: para T-junctions futuras)
+        return is_intersection, is_curve90, False
 
 def _wire_web(robot: Robot):
     if not WEB_AVAILABLE:
@@ -405,3 +399,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
