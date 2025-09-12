@@ -535,24 +535,7 @@ class Robot:
         angle_deg = np.degrees(np.arctan2(alpha, 1.0))
         return float(np.clip(angle_deg, -self.MAX_ANGLE, self.MAX_ANGLE))
 
-    def _detect_intersection(self, bw, widths, cents, angle_deg):
-        wide = sum(widths[:2]) > 300
-        ang_high = abs(angle_deg) > 35
-        valids = [p for p in cents if p is not None]
-        curve_dir = None
-        if valids:
-            xs = [p[0] for p in valids]
-            avg_x = sum(xs) / len(xs)
-            if avg_x < self.WIDTH * 0.25:
-                curve_dir = "left"
-            elif avg_x > self.WIDTH * 0.75:
-                curve_dir = "right"
-        total_width = sum(widths)
-        disappearance = total_width < 50 and len([w for w in widths if w > 0]) < 2
-        is_curve90 = ang_high or (curve_dir is not None and disappearance) or (disappearance and abs(angle_deg) > 20)
-        if ang_high and curve_dir is None:
-            curve_dir = "left" if angle_deg < 0 else "right"
-        return wide, is_curve90, curve_dir
+def _detect_intersection(self, bw, widths, cents, angle_deg):
 
     def _detect_greens(self, frame):
         try:
