@@ -74,8 +74,16 @@ rubber wheels that would not fit the chassis geometry, we modelled a two-part mo
 it, and cast the tyres in silicone. The result grips the track and can be recast in minutes
 if one tears mid-competition.
 
-<!-- CAD: add hardware/cad/*.stl — GitHub renders STL in an interactive 3D viewer -->
-<!-- CAD: add Fusion 360 public share link here -->
+### CAD
+
+**[`hardware/cad/obr-mark-iii.stl`](hardware/cad/obr-mark-iii.stl) — click to open it in
+GitHub's interactive 3D viewer.** Rotate and zoom the full assembly in the browser; nothing
+to install.
+
+Also committed: `obr-mark-iii.3mf`, print-ready with units and metadata preserved.
+Model bounding box 272 × 363 × 190 mm, 67,842 triangles.
+
+<!-- Fusion 360 public share link goes here -->
 
 ---
 

@@ -1,8 +1,14 @@
-# CAD
+# CAD — OBR Mark III
 
-Fusion 360 exports. Commit `.stl` files here — GitHub renders them in an interactive
-3D viewer directly in the browser.
+Designed in Fusion 360, printed in PLA.
 
-- `chassis.stl` — main frame
-- `wheel-mould.stl` — two-part mould for casting the silicone tyres
-- renders as `.png` for the README
+| File | | |
+|---|---|---|
+| `obr-mark-iii.stl` | 3.2 MB · 67,842 triangles | **GitHub renders this in an interactive 3D viewer — click it** |
+| `obr-mark-iii.3mf` | 910 KB | Print-ready, keeps units and metadata |
+
+Model bounding box: 272 × 363 × 190 mm.
+
+The Fusion native `.f3d` (75 MB) is deliberately not committed — it is too large to be
+useful in a git history and unreadable without Fusion. Ask if you want the source file,
+or use the public share link in the main README.
