@@ -1,64 +1,119 @@
-# Robô Seguidor de Linha OBR 2025
+# OBR 2025 — Autonomous Line-Following Robot
 
- Este projeto contém o software para um robô autônomo projetado para o desafio da Olimpíada Brasileira de Robótica (OBR) 2025. O robô é capaz de seguir linhas, desviar de obstáculos e superar desafios da arena de forma autônoma.
+<!-- HERO: replace with hardware/photos/robot-hero.jpg once photos are in -->
 
-## Arquitetura do Software
+An autonomous robot built for the **Olimpíada Brasileira de Robótica (OBR) 2025** — Brazil's
+national robotics olympiad. It follows a line, reads green intersection markers, avoids
+obstacles, and is tuned live from a browser while it drives.
 
-O software é modular e foi desenvolvido em Python, dividido nos seguintes componentes:
+Chassis, wheels and mounts were designed in Fusion 360 and 3D printed. The tyres are custom
+silicone, cast in a printed mould, because the stock printed wheels could not hold the track.
 
- - `main.py`: Orquestrador principal do robô. Contém a máquina de estados que gerencia o comportamento.
-- `hardware_control.py`: Camada de abstração para todo o controle de hardware, incluindo motores com encoders, servos e o driver TB6612FNG.
- - `vision.py`: Módulo de visão computacional. Processa as imagens da câmera para detectar a linha e obstáculos.
- - `line_follower.py`: Implementa a lógica de seguimento de linha, utilizando um controle PID e look-ahead adaptativo.
-- `web_stream.py`: Um servidor web (Flask) que fornece um stream de vídeo ao vivo e uma interface para calibração de parâmetros.
+---
 
-## Recursos Implementados
+## What it does
 
-### Navegação e Seguimento de Linha
-- **Controle PID com Encoders:** Controle preciso de velocidade e distância utilizando um controlador PID que leva em conta a leitura de encoders ópticos em cada roda.
-- **Visão com rotação e varreduras:** A câmera é montada invertida (180°); o software gira a imagem antes do processamento e utiliza varreduras lineares e circulares para prever a trajetória da linha.
-- **Algoritmo RCJ 2014 espelhado:** As varreduras e o cálculo de erro seguem fielmente a lógica do projeto original em C++, garantindo comportamento idêntico ao seguidor de linha da competição.
-- **Detecção de Desafios:** Lógica para identificar e transpor desafios como interseções e obstáculos.
-- **Suporte a linhas grossas:** A visão computacional reconhece pistas com até 20 mm de largura usando operações morfológicas e contornos.
-- **Marcadores verdes em interseções:** detecção de áreas verdes para orientar o robô sobre qual caminho seguir, realizando um retorno de 180° quando dois marcadores aparecem simultaneamente.
+**Line following under a PID controller with optical encoder feedback.** Each wheel reports
+its own speed, so the controller corrects for the two motors never being quite identical —
+the usual reason a differential-drive robot drifts on a straight line.
 
+**Adaptive look-ahead.** The vision system does not just find the line under the robot; it
+scans forward along the expected path and feeds a predicted trajectory into the controller,
+so the robot slows into corners instead of overshooting them.
 
-### Interface Web
-- **Stream de Vídeo ao Vivo:** Transmite a visão do robô em tempo real para um navegador web.
-- **Calibração Remota:** Permite ajustar os principais parâmetros do robô (PID, limites de cor HSV, velocidades) através da interface web, sem a necessidade de alterar o código diretamente.
-- **Sinalização de rota:** O stream destaca marcadores verdes detectados e exibe o caminho planejado até onde a linha deixa de ser visível.
+**Green intersection markers.** OBR arenas mark junctions with green patches indicating which
+branch to take. The vision pipeline segments them in HSV, decides the turn, and executes a
+180° reversal when two markers appear at once.
 
-## Configuração e Uso
+**Camera mounted upside down.** The physical layout forced a 180° camera rotation; the
+software rotates every frame before processing rather than fighting it mechanically.
 
-### 1. Hardware
-- **Placa Controladora:** Raspberry Pi 5 (4GB RAM)
-- **Câmera:** Picamera3 (Wide)
-- **Driver de Motor:** TB6612FNG
-- **Motores:** 2x Motores DC com encoders ópticos
-- **Servos:** 3x Servos para a garra e o reservatório
+**Thick-line support.** Morphological operations and contour analysis handle track lines up
+to 20 mm wide, which break naive centroid-following.
 
-### 2. Instalação
+**Live tuning over the network.** A Flask + Socket.IO server streams the robot's own camera
+view to a browser and exposes PID gains, HSV thresholds and speed limits as live controls.
+Tuning happens while the robot drives, with no reflashing and no reboot.
 
-Clone o repositório e instale as dependências:
+---
 
-```bash
-git clone <URL_DO_REPOSITORIO>
-cd <NOME_DO_REPOSITORIO>
-pip install -r requirements.txt
+## Architecture
+
+```
+src/
+├── main.py               State machine — orchestrates behaviour and mode transitions
+├── vision.py             Camera pipeline: rotation, thresholding, line and marker detection
+├── line_follower.py      PID control, adaptive look-ahead, error computation
+├── hardware_control.py   Motor, encoder and servo abstraction over the TB6612FNG driver
+├── web_stream.py         Flask + Socket.IO live video and remote calibration
+├── led_control.py        Status LEDs
+├── rcj2014_port.py       Scan and error logic ported from the RoboCup Junior 2014 C++ reference
+└── index.html            Calibration interface
 ```
 
-### 3. Execução
+Roughly 1,200 lines of Python across the core modules.
 
-Para iniciar o robô, execute o script principal:
+---
+
+## Hardware
+
+| | |
+|---|---|
+| Compute | Raspberry Pi 5, 4 GB |
+| Camera | Picamera3 Wide, mounted inverted |
+| Motor driver | TB6612FNG dual H-bridge |
+| Drive | 2 × DC motors with optical encoders |
+| Actuators | 3 × servos — gripper and rescue-ball reservoir |
+| Chassis | 3D printed PLA, M3 bolted assembly |
+| Tyres | Silicone, cast in a 3D-printed mould |
+
+### On the tyres
+
+Printed PLA wheels slip on the OBR track surface, especially on inclines. Rather than buy
+rubber wheels that would not fit the chassis geometry, we modelled a two-part mould, printed
+it, and cast the tyres in silicone. The result grips the track and can be recast in minutes
+if one tears mid-competition.
+
+<!-- CAD: add hardware/cad/*.stl — GitHub renders STL in an interactive 3D viewer -->
+<!-- CAD: add Fusion 360 public share link here -->
+
+---
+
+## Running it
+
+The modules import each other flatly, and `web_stream.py` serves `index.html` from its own
+directory, so run from inside `src/`:
 
 ```bash
+pip install -r requirements.txt
+cd src
 python main.py
 ```
 
-### 4. Acessando a Interface Web
+The calibration interface is then at `http://<robot-ip>:5000`.
 
-Com o robô em funcionamento, acesse a interface de controle pelo navegador em qualquer dispositivo na mesma rede Wi-Fi:
+Hardware-dependent imports (`RPi.GPIO`, `picamera2`, `libcamera`) are guarded, so the vision
+and control modules can be exercised on a development machine without the robot attached.
 
-`http://<IP_DO_RASPBERRY_PI>:5000`
+---
 
-O IP do Raspberry Pi pode ser encontrado com o comando `hostname -I`.
+## Repository layout
+
+| Path | |
+|---|---|
+| `src/` | Flight code — the modules above |
+| `hardware/cad/` | Fusion 360 exports: STL and renders |
+| `hardware/photos/` | Robot, electronics, arena |
+| `experiments/` | Bring-up scripts kept from development: servo sweeps, LED and SPI tests, encoder checks, earlier vision attempts |
+| `docs/` | Wiring and tuning notes |
+
+`experiments/` is deliberately preserved. Getting three servos, an SPI LED strip and two
+encoders working reliably took a lot of small scripts, and that iteration is part of the
+project.
+
+---
+
+## Built by
+
+Caio Lacerda — [github.com/caioplcerda](https://github.com/caioplcerda) ·
+[linkedin.com/in/caio-lacerda](https://linkedin.com/in/caio-lacerda-61b7081b9)
