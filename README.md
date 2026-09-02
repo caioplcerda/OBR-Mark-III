@@ -3,9 +3,13 @@
 ![OBR Mark III closing its gripper on a rescue ball](hardware/photos/robot-gripper-rescue-ball.jpg)
 
 An autonomous robot built for the **Olimpíada Brasileira de Robótica (OBR) 2025**, Brazil's
-national robotics olympiad. It follows a line, reads green intersection markers, avoids
-obstacles, collects rescue balls with a rack-and-pinion gripper, and is tuned live from a
-browser while it drives.
+national robotics olympiad. It reads green intersection markers, avoids obstacles, collects
+rescue balls with a rack-and-pinion gripper, and is tuned live from a browser while it drives.
+
+**It follows the line with computer vision — no infrared sensor array.** Most line-following
+robots read the track with a row of IR reflectance sensors a few millimetres above the
+ground. This one has a camera and a **Raspberry Pi 5 (4 GB)**, and the line exists only as
+pixels. Every steering decision comes out of a real-time OpenCV pipeline running at 480p.
 
 Every structural part was designed in Fusion 360 and 3D printed in PLA. The tyres are custom
 silicone, cast in a printed two-part mould, because printed wheels would not hold the track.
@@ -14,13 +18,28 @@ silicone, cast in a printed two-part mould, because printed wheels would not hol
 
 ## What it does
 
-**Line following under a PID controller with optical encoder feedback.** Each wheel reports
-its own speed, so the controller corrects for the two motors never being quite identical —
-the usual reason a differential-drive robot drifts on a straight line.
+### Finding the line in pixels
 
-**Adaptive look-ahead.** The vision system does not just find the line under the robot; it
-scans forward along the expected path and feeds a predicted trajectory into the controller,
-so the robot slows into corners instead of overshooting them.
+The pipeline never thresholds the whole frame looking for a blob. It samples it:
+
+1. **Zero scan.** A horizontal scanline is taken close to the robot and the intensity
+   profile along it is differentiated. The line's edges appear as derivative peaks, which
+   is robust to uneven lighting in a way that a fixed brightness threshold is not. A
+   minimum width of 12 px rejects noise and shadow edges.
+2. **Circular scans.** From that first point, the algorithm sweeps arcs of radius 22 px
+   through 180° to find where the line continues, then repeats from the new point —
+   walking the track forward, several steps ahead of the robot. The traced path is kept in
+   a rolling 7-point history.
+3. **Steering.** A PID controller acts on the lateral offset of the nearest point, with the
+   angle of the traced path fed forward. Because the path is known several points ahead,
+   the robot slows into corners rather than discovering them late.
+
+The scan-and-derivative approach is ported from a RoboCup Junior 2014 C++ reference
+implementation (`rcj2014_port.py`) and re-derived in Python.
+
+**Optical encoder feedback.** Each wheel reports its own speed, so the controller corrects
+for the two motors never being quite identical — the usual reason a differential-drive robot
+drifts on a straight line.
 
 **Green intersection markers.** OBR arenas mark junctions with green patches indicating which
 branch to take. The vision pipeline segments them in HSV, decides the turn, and executes a
@@ -79,7 +98,7 @@ Roughly 1,200 lines of Python across the core modules.
 ### Compute and sensing
 | Part | Qty |
 |---|---|
-| Raspberry Pi 5, 4 GB | 1 |
+| Raspberry Pi 5, 4 GB — runs the whole vision pipeline on-board | 1 |
 | Picamera3 Wide (mounted inverted) | 1 |
 | Ultrasonic distance sensor | 1 |
 | Optical encoder speed-sensor modules | 2 |
