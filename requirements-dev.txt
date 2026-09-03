@@ -1,0 +1,4 @@
+# Desktop test dependencies. The robot itself also needs lgpio and flask.
+pytest>=8.0
+numpy>=1.24
+opencv-python-headless>=4.8

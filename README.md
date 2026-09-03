@@ -262,11 +262,32 @@ and control modules can be exercised on a development machine without the robot 
 
 ---
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+31 tests over the two modules that decide where the robot goes: the scanline and
+derivative line detection in `rcj2014_port.py`, and green-marker detection in `vision.py`.
+
+The cases that matter are the negative ones. A dark speck narrower than the minimum line width
+is noise, not the line. A green marker in the top half of the frame is track the robot has not
+reached yet. A marker inside the outer 10% of the frame belongs to an adjacent lane. Each of
+those filters exists because acting on the wrong one sends the robot down the wrong branch.
+
+Writing them turned up a real bug: `calibrate_by_click` sliced the frame as
+`frame_bgr[y, x:x+1]`, which produces a `(1, 3)` array. `cv2.cvtColor` needs `(1, 1, 3)` and
+raised every time, and because the exception was caught and logged, click-to-calibrate had
+never worked — it just looked like error handling.
+
 ## Repository layout
 
 | Path | |
 |---|---|
-| `src/` | Flight code — the modules above |
+| `src/` | Robot code — the modules above |
+| `tests/` | 31 tests over line detection and green-marker detection |
 | `hardware/cad/` | Fusion 360 exports: STL and 3MF |
 | `hardware/photos/` | Robot photographs |
 | `experiments/` | Bring-up scripts kept from development: servo sweeps, LED and SPI tests, encoder checks, earlier vision attempts |

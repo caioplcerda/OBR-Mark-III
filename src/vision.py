@@ -29,7 +29,14 @@ class Vision:
     # ----- Calibração por clique (HSV do pixel clicado) -----
     def calibrate_by_click(self, frame_bgr, x, y, color="green"):
         try:
-            px_bgr = frame_bgr[int(y), int(x):int(x)+1]
+            # Slice both axes: cvtColor needs a 2D image with 3 channels,
+            # (1, 1, 3). frame_bgr[y, x:x+1] collapses the row axis and yields
+            # (1, 3), which cvtColor rejects — the exception was caught below,
+            # so calibration silently did nothing.
+            px_bgr = frame_bgr[int(y):int(y)+1, int(x):int(x)+1]
+            if px_bgr.size == 0:
+                self.log("Vision: calibrate_by_click out of bounds")
+                return False
             px_hsv = cv2.cvtColor(px_bgr, cv2.COLOR_BGR2HSV)[0,0]
             H, S, V = int(px_hsv[0]), int(px_hsv[1]), int(px_hsv[2])
             if color == "green":
