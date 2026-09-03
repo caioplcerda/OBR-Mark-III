@@ -60,6 +60,73 @@ Tuning happens while the robot drives, with no reflashing and no reboot.
 
 ---
 
+## The parts that were actually hard
+
+### The Raspberry Pi 5 broke every GPIO library
+
+The Pi 5 moved its GPIO behind the RP1 southbridge, and `RPi.GPIO` — the library every
+Raspberry Pi robotics tutorial is written against — does not work on it. Nothing we started
+from ran.
+
+`hardware_control.py` therefore carries its own **GPIO backend abstraction**: a
+`_GPIOBackendBase` interface with pin setup, PWM, and edge-triggered interrupts, implemented
+over `lgpio`. Motor control, encoder interrupts and servo PWM all go through it, so the
+control code is written once against an interface rather than against whichever library
+happens to work on that board revision.
+
+### The LEDs and the motors fought over the same timer
+
+WS2812 addressable LEDs are timing-critical — each bit is a pulse width measured in hundreds
+of nanoseconds, and they are usually driven from the Pi's PWM/DMA hardware. The motors need
+PWM too. Driving the motors with *software* PWM produced jitter that corrupted the LED
+signal; driving the LEDs while software PWM ran produced motor stutter.
+
+The fix is one line of intent in the source — the backend forces **hardware PWM through
+lgpio** specifically so the motor channels do not contend with the WS2812 timing. Finding
+that took considerably longer than fixing it.
+
+### Cascaded control, not a single PID
+
+There are **three** PID controllers running at 50 Hz:
+
+| Loop | Gains | Job |
+|---|---|---|
+| Directional (outer) | kp 0.9, kd 0.14 | Turns line error into a steering command |
+| Left wheel velocity (inner) | kp 0.25, ki 0.35 | Holds the commanded wheel speed |
+| Right wheel velocity (inner) | kp 0.25, ki 0.35 | Same, independently |
+
+The outer loop asks for a turn rate; the inner loops make each wheel actually deliver its
+share of it, from optical encoder feedback at 36 ticks per revolution. Without the inner
+loops the robot steers correctly and still drifts, because no two DC motors respond
+identically to the same duty cycle — the outer loop cannot tell the difference between "the
+line moved" and "the left motor is lazy today."
+
+If the encoders fail, the controller detects it and degrades to open loop rather than
+stopping.
+
+### Telling a junction apart from a sharp corner
+
+The hardest perception problem in OBR is not finding the line. It is deciding whether the
+line suddenly getting wider means *a junction is coming* or *the track turns 90° here* —
+because the correct responses are opposite, and getting it wrong ends the run.
+
+`_detect_intersection()` separates them geometrically. It samples the line's width across
+the bottom strips and the lateral shift between the bottom and top centroids, then combines
+them with the fitted path angle: wide and straight reads as an intersection; a large
+centroid shift with a steep angle reads as a 90° curve.
+
+### Nothing is trusted on one frame
+
+Every detector — intersections, 90° curves, green markers — is **debounced over consecutive
+frames** before the robot acts on it. A single frame of glare on the track, or one shadow
+across a green patch, would otherwise send the robot down the wrong branch at full speed.
+
+Thresholding is adaptive (`ADAPTIVE_THRESH_MEAN_C`, 21 px window) rather than fixed, because
+competition lighting varies across the arena and a global threshold that works at one end of
+the table fails at the other.
+
+---
+
 ## The robot
 
 | | |
